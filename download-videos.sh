@@ -85,6 +85,7 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
 /^[0-9]/ {
     id=$1
     res=""
+    fps=0
     codec=""
     hdr=""
     for(i=1;i<=NF;i++){
@@ -95,6 +96,11 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
         }
         if($i ~ /^[0-9]+p/){
             res = $i
+        }
+
+        # Detectar FPS
+        if($i ~ /^[0-9]+fps$/){
+            fps = substr($i, 1, length($i)-3)
         }
 
         # Detectar códec
@@ -111,13 +117,19 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
     }
 
     if(res != "" && codec != ""){
-        if(hdr != ""){
-            print id "|" res " " codec " (HDR)"
-        } else {
-            print id "|" res " " codec
-        }
+        # Extraer altura numérica (ej: 2160 de 2160p60)
+        split(res, rr, "p")
+        height = rr[1]
+
+        # Formato para ordenar: height fps hdrflag id desc
+        hdrflag = (hdr == "HDR") ? 1 : 0
+
+        desc = res " " codec
+        if(hdr != "") desc = desc " (HDR)"
+
+        print height, fps, hdrflag, id "|" desc
     }
-}')
+}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4-)
 
 # Construir lista para Zenity y mapear ID internamente
 ZENITY_LIST=()
