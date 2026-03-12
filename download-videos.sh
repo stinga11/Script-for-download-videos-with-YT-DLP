@@ -86,18 +86,36 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
     id=$1
     res=""
     codec=""
+    hdr=""
     for(i=1;i<=NF;i++){
-        if($i ~ /^[0-9]+x[0-9]+$/){ split($i, r, "x"); res = r[2] "p" }
-        if($i ~ /^[0-9]+p/){ res = $i }
+        # Detectar resolución
+        if($i ~ /^[0-9]+x[0-9]+$/){
+            split($i, r, "x")
+            res = r[2] "p"
+        }
+        if($i ~ /^[0-9]+p/){
+            res = $i
+        }
+
+        # Detectar códec
         if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
             codec=$i
-            # Limpiar hexadecimal después del codec
             split(codec, c, ".")
             codec=c[1]
+
+            # Detectar HDR
+            if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/){
+                hdr="HDR"
+            }
         }
     }
+
     if(res != "" && codec != ""){
-        print id "|" res " " codec
+        if(hdr != ""){
+            print id "|" res " " codec " (HDR)"
+        } else {
+            print id "|" res " " codec
+        }
     }
 }')
 
