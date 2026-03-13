@@ -169,7 +169,7 @@ if [ "$SELECTED_DESC" = "Solo audio (OPUS)" ]; then
 else
     QUALITY="VIDEO"
     VIDEO_ID="${VIDEO_MAP[$SELECTED_DESC]}"
-    FORMAT="$VIDEO_ID+bestaudio"
+    FORMAT="$VIDEO_ID+bestaudio/best"
 fi
 
 # ---------------------------------------------------------
