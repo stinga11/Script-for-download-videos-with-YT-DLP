@@ -151,7 +151,11 @@ SELECTED_DESC=$(zenity --list \
     --column="Formato" --column="" \
     --hide-column=2 \
     --print-column=1 \
+    --cancel-label="Cancelar" \
     "${ZENITY_LIST[@]}")
+
+# Si canceló
+[ $? -ne 0 ] && exit 0
 
 [ -z "$SELECTED_DESC" ] && exit 0
 
@@ -174,11 +178,14 @@ fi
 
 if [ "$QUALITY" = "5" ]; then
     AUDIO_FORMAT=$(zenity --list \
-        --title="Formato de audio" \
-        --text="Selecciona el formato final del audio:" \
-        --column="Formato" --column="Descripción" \
-        "mp3" "Alta compatibilidad" \
-        "opus" "Mejor calidad/tamaño")
+    --title="Formato de audio" \
+    --text="Selecciona el formato final del audio:" \
+    --column="Formato" --column="Descripción" \
+    --cancel-label="Cancelar" \
+    "mp3" "Alta compatibilidad" \
+    "opus" "Mejor calidad/tamaño")
+
+[ $? -ne 0 ] && exit 0
 
     [ -z "$AUDIO_FORMAT" ] && exit 0
 fi
@@ -268,8 +275,20 @@ while read -r LINE; do
         echo "# Descargando: $PERCENT %"
     fi
 done < "$PIPE"
-) | zenity --progress --title="Descargando" --text="Descargando:\n\n$TITLE" \
-    --percentage=0 --no-cancel --auto-close
+) | zenity --progress \
+    --title="Descargando" \
+    --text="Descargando:\n\n$TITLE" \
+    --percentage=0 \
+    --cancel-label="Cancelar" \
+    --auto-close
+
+# Si el usuario canceló, zenity devuelve código distinto de 0
+if [ $? -ne 0 ]; then
+    kill $YTPID 2>/dev/null
+    rm -f "$PIPE"
+    zenity --info --text="Descarga cancelada."
+    exit 0
+fi
 
 wait $YTPID
 rm -f "$PIPE"
