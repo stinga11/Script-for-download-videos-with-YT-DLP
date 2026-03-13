@@ -185,9 +185,11 @@ if [ "$QUALITY" = "5" ]; then
     "mp3" "Alta compatibilidad" \
     "opus" "Mejor calidad/tamaño")
 
+# Si canceló
 [ $? -ne 0 ] && exit 0
 
-    [ -z "$AUDIO_FORMAT" ] && exit 0
+# Si no eligió nada
+[ -z "$AUDIO_FORMAT" ] && exit 0
 fi
 
 # ---------------------------------------------------------
