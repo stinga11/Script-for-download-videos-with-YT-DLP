@@ -288,6 +288,22 @@ done < "$PIPE"
 if [ $? -ne 0 ]; then
     kill $YTPID 2>/dev/null
     rm -f "$PIPE"
+
+    # Activar nullglob para evitar errores si no hay coincidencias
+    shopt -s nullglob
+
+    # Borrar archivos incompletos (.part, .part-Frag*, .ytdl, .temp)
+    for f in "$DOWNLOAD_DIR"/"${BASENAME_RESTRICT}"*; do
+        case "$f" in
+            *.part|*.part-*|*.ytdl|*.temp)
+                rm -f "$f"
+                ;;
+        esac
+    done
+
+    # Desactivar nullglob
+    shopt -u nullglob
+
     zenity --info --text="Descarga cancelada."
     exit 0
 fi
