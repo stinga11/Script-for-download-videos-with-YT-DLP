@@ -39,12 +39,12 @@ AUDIO_EXTS=("webm" "m4a" "opus")
 
 if command -v wl-paste >/dev/null; then
     CLIP=$(wl-paste --no-newline --type text 2>/dev/null)
-    URL=$(echo "$CLIP" | grep -Eo 'https?://[^ ]+' | head -n1)
+    URL=$(echo "$CLIP" | grep -Eo 'https?://[^"'"'"'<> ]+' | head -n1)
 fi
 
 if [ -z "$URL" ] && command -v xclip >/dev/null; then
     CLIP=$(xclip -o -selection clipboard 2>/dev/null)
-    URL=$(echo "$CLIP" | grep -Eo 'https?://[^ ]+' | head -n1)
+    URL=$(echo "$CLIP" | grep -Eo 'https?://[^"'"'"'<> ]+' | head -n1)
 fi
 
 if [ -z "$URL" ]; then
