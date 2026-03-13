@@ -252,7 +252,6 @@ mkfifo "$PIPE"
 yt-dlp \
     -f "$FORMAT" \
     -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" \
-    --cookies-from-browser firefox \
     --restrict-filenames \
     --retries 10 \
     --fragment-retries 10 \
@@ -326,26 +325,28 @@ fi
 FOUND_FINAL=""
 FILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER"))
 
-if [ -z "$FILE" ]; then
+if [ -n "$FILE" ]; then
+    FOUND_FINAL="$DOWNLOAD_DIR/$FILE"
+else
     for BASE in "$BASENAME_ORIG" "$BASENAME_RESTRICT"; do
         for EXT in "${EXTS[@]}"; do
             CANDIDATE="$DOWNLOAD_DIR/${BASE}.$EXT"
-            if [ -f "$CANDIDATE" ]; then
 
+            if [ -f "$CANDIDATE" ]; then
                 if [ "$QUALITY" = "5" ]; then
                     is_audio_only "$CANDIDATE" && FOUND_FINAL="$CANDIDATE" && break 2
                 else
                     ! is_audio_only "$CANDIDATE" && FOUND_FINAL="$CANDIDATE" && break 2
                 fi
-
             fi
         done
     done
-else
-    FOUND_FINAL="$DOWNLOAD_DIR/$FILE"
 fi
 
-[ ! -f "$FOUND_FINAL" ] && zenity --error --text="No se encontró el archivo final." && exit 1
+if [ -z "$FOUND_FINAL" ] || [ ! -f "$FOUND_FINAL" ]; then
+    zenity --error --text="No se encontró el archivo final."
+    exit 1
+fi
 
 FULLPATH="$FOUND_FINAL"
 
