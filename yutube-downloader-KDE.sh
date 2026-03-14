@@ -85,44 +85,38 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
 
     for(i=1;i<=NF;i++){
         if($i ~ /^[0-9]+x[0-9]+$/){
-            split($i,r,"x")
-            res=r[2]"p"
+            split($i, r, "x")
+            res = r[2] "p"
         }
-
-        if($i ~ /^[0-9]+p[0-9]+$/){
-            match($i, /^([0-9]+)p([0-9]+)$/, m)
-            res=m[1]"p"
-            fps=m[2]
+        if($i ~ /^[0-9]+p/){
+            res = $i
         }
-
-        if($i ~ /^[0-9]+p$/){
-            res=$i
-        }
-
         if ($i ~ /^[0-9]+fps$/) {
-            fps = substr($i,1,length($i)-3)
+            fps = substr($i, 1, length($i)-3)
         }
-
+        else if ($i ~ /^[0-9]+$/ && $i >= 10 && $i <= 240) {
+            fps = $i
+        }
         if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
             codec=$i
-            split(codec,c,".")
+            split(codec, c, ".")
             codec=c[1]
-
-            if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/)
+            if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/){
                 hdr="HDR"
+            }
         }
     }
 
-    if(res!="" && codec!=""){
-        split(res,rr,"p")
+    if(res != "" && codec != ""){
+        split(res, rr, "p")
         height = rr[1]
-        hdrflag = (hdr=="HDR") ? 1 : 0
-
-        desc=res
-        if(fps>0) desc=desc" "fps"fps"
-        desc=desc" "codec
-        if(hdr!="") desc=desc" (HDR)"
-
+        hdrflag = (hdr == "HDR") ? 1 : 0
+        if (fps > 0) {
+            desc = res " " fps "fps " codec
+        } else {
+            desc = res " " codec
+        }
+        if(hdr != "") desc = desc " (HDR)"
         print height, hdrflag, fps, id "|" desc
     }
 }' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4-)
