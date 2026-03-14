@@ -88,7 +88,12 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
             split($i, r, "x")
             res = r[2] "p"
         }
-        if($i ~ /^[0-9]+p/){
+        if($i ~ /^[0-9]+p[0-9]+$/){
+            match($i, /^([0-9]+)p([0-9]+)$/, m)
+            res = m[1] "p"
+            fps = m[2]
+        }
+        else if($i ~ /^[0-9]+p$/){
             res = $i
         }
         if ($i ~ /^[0-9]+fps$/) {
