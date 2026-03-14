@@ -82,49 +82,77 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
     fps=0
     codec=""
     hdr=""
+    tbr=0
+    codec_rank=0
 
     for(i=1;i<=NF;i++){
+
         if($i ~ /^[0-9]+x[0-9]+$/){
-            split($i, r, "x")
-            res = r[2] "p"
+            split($i,r,"x")
+            res=r[2]"p"
         }
+
         if($i ~ /^[0-9]+p[0-9]+$/){
-            match($i, /^([0-9]+)p([0-9]+)$/, m)
-            res = m[1] "p"
-            fps = m[2]
+            match($i,/^([0-9]+)p([0-9]+)$/,m)
+            res=m[1]"p"
+            fps=m[2]
         }
         else if($i ~ /^[0-9]+p$/){
-            res = $i
+            res=$i
         }
-        if ($i ~ /^[0-9]+fps$/) {
-            fps = substr($i, 1, length($i)-3)
+
+        if($i ~ /^[0-9]+fps$/){
+            fps=substr($i,1,length($i)-3)
         }
-        else if ($i ~ /^[0-9]+$/ && $i >= 10 && $i <= 240) {
-            fps = $i
+
+        # FPS como número suelto
+        if($i ~ /^[0-9]+$/ && res!="" && fps==0){
+            fps=$i
         }
+
         if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
             codec=$i
-            split(codec, c, ".")
+            split(codec,c,".")
             codec=c[1]
-            if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/){
+
+            if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/)
                 hdr="HDR"
-            }
+        }
+
+        if($i ~ /^[0-9]+k$/){
+            tbr=substr($i,1,length($i)-1)
         }
     }
 
-    if(res != "" && codec != ""){
-        split(res, rr, "p")
-        height = rr[1]
-        hdrflag = (hdr == "HDR") ? 1 : 0
-        if (fps > 0) {
-            desc = res " " fps "fps " codec
-        } else {
-            desc = res " " codec
-        }
-        if(hdr != "") desc = desc " (HDR)"
-        print height, hdrflag, fps, id "|" desc
+    # prioridad de codec: av1 > vp9 > avc
+    if(codec=="av01" || codec=="av1")
+        codec_rank=3
+    else if(codec=="vp9")
+        codec_rank=2
+    else if(codec=="avc" || codec=="h264")
+        codec_rank=1
+
+    if(res!="" && codec!=""){
+
+        split(res,rr,"p")
+        height=rr[1]
+        hdrflag=(hdr=="HDR")?1:0
+
+        if(fps>0)
+            desc=res" "fps"fps "codec
+        else
+            desc=res" "codec
+
+        if(tbr>0)
+            desc=desc" ("tbr"k)"
+
+        if(hdr!="")
+            desc=desc" (HDR)"
+
+        print height, hdrflag, fps, codec_rank, tbr, id "|" desc
     }
-}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4-)
+
+}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5nr | cut -d" " -f6-)
 
 declare -A VIDEO_MAP
 MENU=()
