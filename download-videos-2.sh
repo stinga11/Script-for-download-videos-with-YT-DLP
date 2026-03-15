@@ -91,6 +91,11 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
             fps=substr($i,1,length($i)-3)
         }
 
+        # FPS como número suelto (columna FPS separada en formato NxN)
+        if($i ~ /^[0-9]+$/ && $i+0 >= 1 && $i+0 <= 240 && res!="" && fps==0){
+            fps=$i+0
+        }
+
         if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
             codec=$i
             split(codec,c,".")
@@ -273,7 +278,7 @@ done
 ZENITY_EXIT=$?
 
 # ---------------------------------------------------------
-# Cancelación: borrar archivos temporales del basename
+# Cancelación: borrar archivo descargado parcialmente
 # ---------------------------------------------------------
 
 if [ $ZENITY_EXIT -ne 0 ]; then
@@ -326,16 +331,19 @@ FULLPATH="$DOWNLOAD_DIR/$NEWFILE"
 # ---------------------------------------------------------
 
 if [ "$QUALITY" = "AUDIO" ]; then
-    # Mostrar dialog mientras ffmpeg convierte en background
+    # Mostrar dialog pulsante mientras ffmpeg convierte en background
+    CONVERTTMP=$(mktemp /tmp/ytdownloader-converted-XXXX.tmp)
+
     (
         NEWFILE2=$(convert_audio "$FULLPATH" "$AUDIO_FORMAT")
-        echo "$NEWFILE2" > /tmp/ytdownloader-converted.tmp
+        echo "$NEWFILE2" > "$CONVERTTMP"
     ) &
     FFMPEG_PID=$!
 
+    # El subshell solo necesita mantener el pipe abierto mientras
+    # ffmpeg trabaja; zenity --pulsate ignora el texto actualizado.
     (
         while kill -0 $FFMPEG_PID 2>/dev/null; do
-            echo "# Convirtiendo a $AUDIO_FORMAT..."
             sleep 0.5
         done
     ) | zenity --progress \
@@ -347,8 +355,8 @@ if [ "$QUALITY" = "AUDIO" ]; then
         --no-cancel
 
     wait $FFMPEG_PID
-    NEWFILE2=$(cat /tmp/ytdownloader-converted.tmp 2>/dev/null)
-    rm -f /tmp/ytdownloader-converted.tmp
+    NEWFILE2=$(cat "$CONVERTTMP" 2>/dev/null)
+    rm -f "$CONVERTTMP"
 
     if [ -f "$NEWFILE2" ]; then
         rm "$FULLPATH"
