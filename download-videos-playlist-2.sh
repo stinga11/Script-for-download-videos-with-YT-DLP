@@ -1,4 +1,5 @@
 #!/bin/bash
+# v3
 
 DOWNLOAD_DIR="$HOME/Videos"
 mkdir -p "$DOWNLOAD_DIR"
@@ -106,7 +107,7 @@ if [ "$IS_PLAYLIST" = "1" ]; then
             if($i ~ /^[0-9]+p[0-9]+$/){ match($i,/^([0-9]+)p([0-9]+)$/,m); res=m[1]"p"; fps=m[2] }
             else if($i ~ /^[0-9]+p$/){ res=$i }
             if($i ~ /^[0-9]+fps$/){ fps=substr($i,1,length($i)-3) }
-            if($i ~ /^[0-9]+$/ && res!="" && fps==0){ fps=$i }
+            if($i ~ /^[0-9]+$/ && $i+0>=1 && $i+0<=240 && res!="" && fps==0){ fps=$i+0 }
             if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
                 codec=$i; split(codec,c,"."); codec=c[1]
                 if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/) hdr="HDR"
@@ -202,8 +203,7 @@ if [ "$IS_PLAYLIST" = "1" ]; then
     fi
 
     # ---- Descarga con progreso ----
-    PIPE=$(mktemp -u /tmp/ytdownloader.XXXX)
-    mkfifo "$PIPE"
+    TMPLOG=$(mktemp /tmp/ytdownloader-XXXX.log)
 
     if [ "$QUALITY" = "AUDIO" ]; then
         POST_ARGS="--extract-audio --audio-format $AUDIO_FORMAT --audio-quality 0"
@@ -224,7 +224,7 @@ if [ "$IS_PLAYLIST" = "1" ]; then
         --progress-template "%(progress._percent_str)s|%(info.playlist_index)s|%(info.n_entries)s|%(info.title)s" \
         $POST_ARGS \
         $OVERWRITE_FLAG \
-        "$URL" > "$PIPE" 2>&1 &
+        "$URL" >> "$TMPLOG" 2>&1 &
 
     YTPID=$!
 
@@ -233,7 +233,7 @@ if [ "$IS_PLAYLIST" = "1" ]; then
     TOTAL=0
     CURRENT_TITLE=""
     PERC=0
-    while read -r LINE; do
+    tail -f --pid=$YTPID "$TMPLOG" | while read -r LINE; do
         if echo "$LINE" | grep -qE '^[0-9]+(\.?[0-9]*)%\|'; then
             IFS='|' read -r PERC IDX NTOTAL VTITLE <<< "$(echo "$LINE" | sed 's/%//')"
 
@@ -257,7 +257,7 @@ if [ "$IS_PLAYLIST" = "1" ]; then
                 fi
             fi
         fi
-    done < "$PIPE"
+    done
     ) | zenity --progress \
         --title="Descargando playlist: $PLAYLIST_TITLE" \
         --text="Iniciando..." \
@@ -265,10 +265,12 @@ if [ "$IS_PLAYLIST" = "1" ]; then
         --cancel-label="Cancelar" \
         --auto-close
 
-    if [ $? -ne 0 ]; then
+    ZENITY_EXIT=$?
+
+    if [ $ZENITY_EXIT -ne 0 ]; then
         kill -TERM $YTPID 2>/dev/null
         wait $YTPID 2>/dev/null
-        rm -f "$PIPE"
+        rm -f "$TMPLOG"
 
         shopt -s nullglob
         for f in "$PLAYLIST_DEST"/*; do
@@ -285,7 +287,7 @@ if [ "$IS_PLAYLIST" = "1" ]; then
     fi
 
     wait $YTPID
-    rm -f "$PIPE"
+    rm -f "$TMPLOG"
 
     # ---------------------------------------------------------
     # Info final (un solo resumen para toda la playlist)
@@ -351,32 +353,85 @@ TITLE=$(yt-dlp --get-title "$URL" 2>/dev/null)
 FORMAT_LIST=$(yt-dlp -F "$URL" 2>/dev/null)
 [ -z "$FORMAT_LIST" ] && zenity --error --text="No se pudieron obtener los formatos disponibles." && exit 1
 
+# ---------------------------------------------------------
+# Parseo de formatos
+# ---------------------------------------------------------
+
 VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
 /^[0-9]/ {
-    id=$1; res=""; fps=0; codec=""; hdr=""; tbr=0; codec_rank=0
+    id=$1
+    res=""
+    fps=0
+    codec=""
+    hdr=""
+    tbr=0
+    codec_rank=0
+
     for(i=1;i<=NF;i++){
-        if($i ~ /^[0-9]+x[0-9]+$/){ split($i,r,"x"); res=r[2]"p" }
-        if($i ~ /^[0-9]+p[0-9]+$/){ match($i,/^([0-9]+)p([0-9]+)$/,m); res=m[1]"p"; fps=m[2] }
-        else if($i ~ /^[0-9]+p$/){ res=$i }
-        if($i ~ /^[0-9]+fps$/){ fps=substr($i,1,length($i)-3) }
-        if($i ~ /^[0-9]+$/ && res!="" && fps==0){ fps=$i }
-        if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
-            codec=$i; split(codec,c,"."); codec=c[1]
-            if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/) hdr="HDR"
+
+        if($i ~ /^[0-9]+x[0-9]+$/){
+            split($i,r,"x")
+            res=r[2]"p"
         }
-        if($i ~ /^[0-9]+k$/){ tbr=substr($i,1,length($i)-1) }
+
+        if($i ~ /^[0-9]+p[0-9]+$/){
+            match($i,/^([0-9]+)p([0-9]+)$/,m)
+            res=m[1]"p"
+            fps=m[2]
+        }
+        else if($i ~ /^[0-9]+p$/){
+            res=$i
+        }
+
+        if($i ~ /^[0-9]+fps$/){
+            fps=substr($i,1,length($i)-3)
+        }
+
+        if($i ~ /^[0-9]+$/ && $i+0>=1 && $i+0<=240 && res!="" && fps==0){
+            fps=$i+0
+        }
+
+        if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
+            codec=$i
+            split(codec,c,".")
+            codec=c[1]
+
+            if($i ~ /vp9\.2/ || $i ~ /av01.*M/ || $i ~ /hvc1/ || $i ~ /hev1/)
+                hdr="HDR"
+        }
+
+        if($i ~ /^[0-9]+k$/){
+            tbr=substr($i,1,length($i)-1)
+        }
     }
-    if(codec=="av01"||codec=="av1") codec_rank=3
-    else if(codec=="vp9") codec_rank=2
-    else if(codec=="avc"||codec=="h264") codec_rank=1
+
+    if(codec=="av01" || codec=="av1")
+        codec_rank=3
+    else if(codec=="vp9")
+        codec_rank=2
+    else if(codec=="avc" || codec=="h264")
+        codec_rank=1
+
     if(res!="" && codec!=""){
-        split(res,rr,"p"); height=rr[1]; hdrflag=(hdr=="HDR")?1:0
-        if(fps>0) desc=res" "fps"fps "codec
-        else desc=res" "codec
-        if(tbr>0) desc=desc" ("tbr"k)"
-        if(hdr!="") desc=desc" (HDR)"
+
+        split(res,rr,"p")
+        height=rr[1]
+        hdrflag=(hdr=="HDR")?1:0
+
+        if(fps>0)
+            desc=res" "fps"fps "codec
+        else
+            desc=res" "codec
+
+        if(tbr>0)
+            desc=desc" ("tbr"k)"
+
+        if(hdr!="")
+            desc=desc" (HDR)"
+
         print height, hdrflag, fps, codec_rank, tbr, id "|" desc
     }
+
 }' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5nr | cut -d" " -f6-)
 
 declare -A VIDEO_MAP
@@ -398,6 +453,10 @@ SELECTED=$(zenity --list \
 [ $? -ne 0 ] && exit 0
 [ -z "$SELECTED" ] && exit 0
 
+# ---------------------------------------------------------
+# Determinar formato
+# ---------------------------------------------------------
+
 if [ "$SELECTED" = "Solo audio (OPUS)" ]; then
     QUALITY="AUDIO"
     FORMAT="bestaudio"
@@ -406,6 +465,10 @@ else
     VIDEO_ID="${VIDEO_MAP[$SELECTED]}"
     FORMAT="$VIDEO_ID+bestaudio"
 fi
+
+# ---------------------------------------------------------
+# Si es audio, elegir formato final
+# ---------------------------------------------------------
 
 if [ "$QUALITY" = "AUDIO" ]; then
     AUDIO_FORMAT=$(zenity --list \
@@ -419,37 +482,48 @@ if [ "$QUALITY" = "AUDIO" ]; then
     [ -z "$AUDIO_FORMAT" ] && exit 0
 fi
 
-BASENAME_ORIG="$TITLE"
-BASENAME_RESTRICT=$(echo "$BASENAME_ORIG" | tr ' ' '_' | tr -cd 'A-Za-z0-9._-')
+# ---------------------------------------------------------
+# Nombre base y detección de archivo existente
+# ---------------------------------------------------------
 
-if [ "$QUALITY" = "AUDIO" ]; then
-    EXTS=("webm" "m4a" "opus" "mp3")
-else
-    EXTS=("mkv" "mp4" "webm" "m4a" "opus")
-fi
+# Usamos --get-filename para obtener el nombre exacto que yt-dlp produciría,
+# evitando discrepancias entre nuestra normalización y la de --restrict-filenames
+EXPECTED_FILE=$(yt-dlp \
+    -f "$FORMAT" \
+    -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" \
+    --restrict-filenames \
+    --merge-output-format mkv \
+    --get-filename \
+    "$URL" 2>/dev/null | head -n1)
 
 FOUND_FILE=""
-for BASE in "$BASENAME_ORIG" "$BASENAME_RESTRICT"; do
-    for EXT in "${EXTS[@]}"; do
-        CANDIDATE="$DOWNLOAD_DIR/${BASE}.$EXT"
-        if [ -f "$CANDIDATE" ]; then
-            if [ "$QUALITY" = "AUDIO" ]; then
-                ACTUAL_CODEC=$(ffprobe -v error \
-                    -select_streams a:0 \
-                    -show_entries stream=codec_name \
-                    -of default=nw=1:nk=1 "$CANDIDATE" 2>/dev/null)
-                HAS_VIDEO=$(ffprobe -v error -select_streams v:0 \
-                    -show_entries stream=codec_type \
-                    -of csv=p=0 "$CANDIDATE" 2>/dev/null | grep -q video && echo yes)
-                if [ "$HAS_VIDEO" != "yes" ] && [ "$ACTUAL_CODEC" = "$AUDIO_FORMAT" ]; then
-                    FOUND_FILE="$CANDIDATE" && break 2
-                fi
-            else
-                ! is_audio_only "$CANDIDATE" && FOUND_FILE="$CANDIDATE" && break 2
+BASENAME_RESTRICT=""
+
+if [ -n "$EXPECTED_FILE" ]; then
+    BASENAME_RESTRICT=$(basename "${EXPECTED_FILE%.*}")
+
+    if [ "$QUALITY" = "AUDIO" ]; then
+        AUDIO_CANDIDATE="$DOWNLOAD_DIR/$BASENAME_RESTRICT.$AUDIO_FORMAT"
+        if [ -f "$AUDIO_CANDIDATE" ]; then
+            HAS_VIDEO=$(ffprobe -v error \
+                -select_streams v:0 \
+                -show_entries stream=codec_type \
+                -of csv=p=0 "$AUDIO_CANDIDATE" 2>/dev/null | grep -q video && echo yes)
+            if [ "$HAS_VIDEO" != "yes" ]; then
+                FOUND_FILE="$AUDIO_CANDIDATE"
             fi
         fi
-    done
-done
+    else
+        if [ -f "$EXPECTED_FILE" ]; then
+            if ffprobe -v error \
+                -select_streams v:0 \
+                -show_entries stream=codec_type \
+                -of csv=p=0 "$EXPECTED_FILE" 2>/dev/null | grep -q video; then
+                FOUND_FILE="$EXPECTED_FILE"
+            fi
+        fi
+    fi
+fi
 
 OVERWRITE_FLAG=""
 if [ -n "$FOUND_FILE" ]; then
@@ -464,10 +538,17 @@ if [ -n "$FOUND_FILE" ]; then
     OVERWRITE_FLAG="--force-overwrites"
 fi
 
-BEFORE=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f %s\n" | sort)
+# ---------------------------------------------------------
+# Snapshot de archivos antes
+# ---------------------------------------------------------
 
-PIPE=$(mktemp -u /tmp/ytdownloader.XXXX)
-mkfifo "$PIPE"
+BEFORE=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
+
+# ---------------------------------------------------------
+# Descarga
+# ---------------------------------------------------------
+
+TMPLOG=$(mktemp /tmp/ytdownloader-XXXX.log)
 
 yt-dlp \
     -f "$FORMAT" \
@@ -480,21 +561,21 @@ yt-dlp \
     --newline \
     --progress-template "%(progress._percent_str)s" \
     $OVERWRITE_FLAG \
-    "$URL" > "$PIPE" 2>&1 &
+    "$URL" >> "$TMPLOG" 2>&1 &
 
 YTPID=$!
 
 (
-while read -r LINE; do
+tail -f --pid=$YTPID "$TMPLOG" | while read -r LINE; do
     CLEAN=$(echo "$LINE" | tr -d '[:space:]')
     if [[ "$CLEAN" =~ ^([0-9]+(\.[0-9]+)?)%$ ]]; then
         RAW="${BASH_REMATCH[1]}"
         PERCENT=$(printf "%.0f" "$RAW")
         [ "$PERCENT" -ge 100 ] && PERCENT=99
         echo "$PERCENT"
-        echo "# Descargando: $PERCENT%"
+        echo "# Descargando: $PERCENT %"
     fi
-done < "$PIPE"
+done
 ) | zenity --progress \
     --title="$TITLE" \
     --text="Descargando..." \
@@ -502,31 +583,52 @@ done < "$PIPE"
     --cancel-label="Cancelar" \
     --auto-close
 
-if [ $? -ne 0 ]; then
+ZENITY_EXIT=$?
+
+# ---------------------------------------------------------
+# Cancelación
+# ---------------------------------------------------------
+
+if [ $ZENITY_EXIT -ne 0 ]; then
     kill -TERM $YTPID 2>/dev/null
     wait $YTPID 2>/dev/null
-    rm -f "$PIPE"
+    rm -f "$TMPLOG"
 
-    shopt -s nullglob
-    for f in "$DOWNLOAD_DIR"/"${BASENAME_RESTRICT}"*; do
-        case "$f" in
-            *.part|*.part-*|*.ytdl|*.temp)
-                rm -f "$f"
-                ;;
-        esac
-    done
-    shopt -u nullglob
+    if [ -n "$BASENAME_RESTRICT" ]; then
+        for PART in "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.part \
+                    "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.ytdl; do
+            [ -f "$PART" ] && rm -f "$PART"
+        done
+    fi
+
+    AFTER_CANCEL=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
+    NEWFILE_CANCEL=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER_CANCEL") | head -n1)
+    if [ -n "$NEWFILE_CANCEL" ]; then
+        rm -f "$DOWNLOAD_DIR/$NEWFILE_CANCEL"
+    fi
 
     zenity --info --text="Descarga cancelada."
     exit 0
 fi
 
 wait $YTPID
-rm -f "$PIPE"
+rm -f "$TMPLOG"
 
-AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f %s\n" | sort)
+# ---------------------------------------------------------
+# Snapshot después
+# ---------------------------------------------------------
 
-NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | awk '{print $1}' | head -n1)
+AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
+
+# ---------------------------------------------------------
+# Detectar archivo final
+# ---------------------------------------------------------
+
+NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -n1)
+
+if [ -z "$NEWFILE" ] && [ -n "$FOUND_FILE" ]; then
+    NEWFILE=$(basename "$FOUND_FILE")
+fi
 
 if [ -z "$NEWFILE" ]; then
     zenity --error --text="No se encontró el archivo final."
@@ -535,13 +637,44 @@ fi
 
 FULLPATH="$DOWNLOAD_DIR/$NEWFILE"
 
+# ---------------------------------------------------------
+# Conversión final si es audio
+# ---------------------------------------------------------
+
 if [ "$QUALITY" = "AUDIO" ]; then
-    NEWFILE2=$(convert_audio "$FULLPATH" "$AUDIO_FORMAT")
+    CONVERTTMP=$(mktemp /tmp/ytdownloader-converted-XXXX.tmp)
+
+    (
+        NEWFILE2=$(convert_audio "$FULLPATH" "$AUDIO_FORMAT")
+        echo "$NEWFILE2" > "$CONVERTTMP"
+    ) &
+    FFMPEG_PID=$!
+
+    (
+        while kill -0 $FFMPEG_PID 2>/dev/null; do
+            sleep 0.5
+        done
+    ) | zenity --progress \
+        --title="$TITLE" \
+        --text="Convirtiendo a $AUDIO_FORMAT..." \
+        --percentage=0 \
+        --pulsate \
+        --auto-close \
+        --no-cancel
+
+    wait $FFMPEG_PID
+    NEWFILE2=$(cat "$CONVERTTMP" 2>/dev/null)
+    rm -f "$CONVERTTMP"
+
     if [ -f "$NEWFILE2" ]; then
         rm "$FULLPATH"
         FULLPATH="$NEWFILE2"
     fi
 fi
+
+# ---------------------------------------------------------
+# Info final
+# ---------------------------------------------------------
 
 INFO=$(ffprobe -v error -select_streams v:0 -show_entries stream=height,codec_name \
     -of csv=p=0 "$FULLPATH" 2>/dev/null)
@@ -549,7 +682,7 @@ INFO=$(ffprobe -v error -select_streams v:0 -show_entries stream=height,codec_na
 if [ -z "$INFO" ]; then
     RES="Solo audio"
     CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
-        -of csv=p=0 "$FULLPATH")
+        -of csv=p=0 "$FULLPATH" 2>/dev/null)
 else
     CODEC=$(echo "$INFO" | cut -d',' -f1)
     HEIGHT=$(echo "$INFO" | cut -d',' -f2)
