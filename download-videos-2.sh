@@ -58,7 +58,7 @@ FORMAT_LIST=$(yt-dlp -F "$URL" 2>/dev/null)
 [ -z "$FORMAT_LIST" ] && zenity --error --text="No se pudieron obtener los formatos disponibles." && exit 1
 
 # ---------------------------------------------------------
-# Parseo PRO de formatos
+# Parseo de formatos
 # ---------------------------------------------------------
 
 VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
@@ -91,11 +91,6 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
             fps=substr($i,1,length($i)-3)
         }
 
-        # FPS como número suelto
-        if($i ~ /^[0-9]+$/ && res!="" && fps==0){
-            fps=$i
-        }
-
         if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
             codec=$i
             split(codec,c,".")
@@ -110,7 +105,7 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
         }
     }
 
-    # prioridad de codec: av1 > vp9 > avc
+    # prioridad de codec: av1 > vp9 > avc/h264
     if(codec=="av01" || codec=="av1")
         codec_rank=3
     else if(codec=="vp9")
@@ -189,12 +184,10 @@ if [ "$QUALITY" = "AUDIO" ]; then
 fi
 
 # ---------------------------------------------------------
-# Nombre base y detección de archivo existente (como el original)
+# Nombre base y detección de archivo existente
 # ---------------------------------------------------------
 
-# Usamos el título para construir el basename "restringido"
-BASENAME_ORIG="$TITLE"
-BASENAME_RESTRICT=$(echo "$BASENAME_ORIG" | tr ' ' '_' | tr -cd 'A-Za-z0-9._-')
+BASENAME_RESTRICT=$(echo "$TITLE" | tr ' ' '_' | tr -cd 'A-Za-z0-9._-')
 
 if [ "$QUALITY" = "AUDIO" ]; then
     EXTS=("webm" "m4a" "opus" "mp3")
@@ -203,7 +196,7 @@ else
 fi
 
 FOUND_FILE=""
-for BASE in "$BASENAME_ORIG" "$BASENAME_RESTRICT"; do
+for BASE in "$TITLE" "$BASENAME_RESTRICT"; do
     for EXT in "${EXTS[@]}"; do
         CANDIDATE="$DOWNLOAD_DIR/${BASE}.$EXT"
         if [ -f "$CANDIDATE" ]; then
@@ -233,14 +226,16 @@ fi
 # Snapshot de archivos antes
 # ---------------------------------------------------------
 
-BEFORE=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f %s\n" | sort)
+BEFORE=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
 
 # ---------------------------------------------------------
-# Descarga PRO
+# Descarga
 # ---------------------------------------------------------
 
-PIPE=$(mktemp -u /tmp/ytdownloader.XXXX)
-mkfifo "$PIPE"
+# Usamos un archivo temporal en lugar de un FIFO para evitar
+# bloqueos: un FIFO congela al abrir si no hay lector/escritor
+# simultáneo. Con un archivo + tail -f no hay ese problema.
+TMPLOG=$(mktemp /tmp/ytdownloader-XXXX.log)
 
 yt-dlp \
     -f "$FORMAT" \
@@ -253,12 +248,12 @@ yt-dlp \
     --newline \
     --progress-template "%(progress._percent_str)s" \
     $OVERWRITE_FLAG \
-    "$URL" > "$PIPE" 2>&1 &
+    "$URL" >> "$TMPLOG" 2>&1 &
 
 YTPID=$!
 
 (
-while read -r LINE; do
+tail -f --pid=$YTPID "$TMPLOG" | while read -r LINE; do
     CLEAN=$(echo "$LINE" | tr -d '[:space:]')
     if [[ "$CLEAN" =~ ^([0-9]+(\.[0-9]+)?)%$ ]]; then
         RAW="${BASH_REMATCH[1]}"
@@ -267,51 +262,57 @@ while read -r LINE; do
         echo "$PERCENT"
         echo "# Descargando: $PERCENT %"
     fi
-done < "$PIPE"
+done
 ) | zenity --progress \
-    --title="Descargando" \
-    --text="Descargando:\n\n$TITLE" \
+    --title="$TITLE" \
+    --text="Descargando..." \
     --percentage=0 \
     --cancel-label="Cancelar" \
     --auto-close
 
+ZENITY_EXIT=$?
+
 # ---------------------------------------------------------
-# Cancelación: borrar archivos relacionados al basename (como el original)
+# Cancelación: borrar archivos temporales del basename
 # ---------------------------------------------------------
 
-if [ $? -ne 0 ]; then
+if [ $ZENITY_EXIT -ne 0 ]; then
     kill -TERM $YTPID 2>/dev/null
     wait $YTPID 2>/dev/null
-    rm -f "$PIPE"
+    rm -f "$TMPLOG"
 
-    shopt -s nullglob
-    for f in "$DOWNLOAD_DIR"/"${BASENAME_RESTRICT}"*; do
-        case "$f" in
-            *.part|*.part-*|*.ytdl|*.temp)
-                rm -f "$f"
-                ;;
-        esac
-    done
-    shopt -u nullglob
+    # Borrar el archivo que yt-dlp alcanzó a crear antes de ser cancelado
+    AFTER_CANCEL=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
+    NEWFILE_CANCEL=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER_CANCEL") | head -n1)
+    if [ -n "$NEWFILE_CANCEL" ]; then
+        rm -f "$DOWNLOAD_DIR/$NEWFILE_CANCEL"
+    fi
 
     zenity --info --text="Descarga cancelada."
     exit 0
 fi
 
 wait $YTPID
-rm -f "$PIPE"
+rm -f "$TMPLOG"
 
 # ---------------------------------------------------------
 # Snapshot después
 # ---------------------------------------------------------
 
-AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f %s\n" | sort)
+AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
 
 # ---------------------------------------------------------
 # Detectar archivo final
 # ---------------------------------------------------------
 
-NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | awk '{print $1}' | head -n1)
+# comm -13 con nombres solos detecta archivos nuevos siempre.
+# Si se sobreescribió (mismo nombre en BEFORE y AFTER), comm no
+# lo detecta → fallback a FOUND_FILE, igual que en kdialog.
+NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -n1)
+
+if [ -z "$NEWFILE" ] && [ -n "$FOUND_FILE" ]; then
+    NEWFILE=$(basename "$FOUND_FILE")
+fi
 
 if [ -z "$NEWFILE" ]; then
     zenity --error --text="No se encontró el archivo final."
@@ -325,7 +326,30 @@ FULLPATH="$DOWNLOAD_DIR/$NEWFILE"
 # ---------------------------------------------------------
 
 if [ "$QUALITY" = "AUDIO" ]; then
-    NEWFILE2=$(convert_audio "$FULLPATH" "$AUDIO_FORMAT")
+    # Mostrar dialog mientras ffmpeg convierte en background
+    (
+        NEWFILE2=$(convert_audio "$FULLPATH" "$AUDIO_FORMAT")
+        echo "$NEWFILE2" > /tmp/ytdownloader-converted.tmp
+    ) &
+    FFMPEG_PID=$!
+
+    (
+        while kill -0 $FFMPEG_PID 2>/dev/null; do
+            echo "# Convirtiendo a $AUDIO_FORMAT..."
+            sleep 0.5
+        done
+    ) | zenity --progress \
+        --title="$TITLE" \
+        --text="Convirtiendo a $AUDIO_FORMAT..." \
+        --percentage=0 \
+        --pulsate \
+        --auto-close \
+        --no-cancel
+
+    wait $FFMPEG_PID
+    NEWFILE2=$(cat /tmp/ytdownloader-converted.tmp 2>/dev/null)
+    rm -f /tmp/ytdownloader-converted.tmp
+
     if [ -f "$NEWFILE2" ]; then
         rm "$FULLPATH"
         FULLPATH="$NEWFILE2"
@@ -342,7 +366,7 @@ INFO=$(ffprobe -v error -select_streams v:0 -show_entries stream=height,codec_na
 if [ -z "$INFO" ]; then
     RES="Solo audio"
     CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
-        -of csv=p=0 "$FULLPATH")
+        -of csv=p=0 "$FULLPATH" 2>/dev/null)
 else
     CODEC=$(echo "$INFO" | cut -d',' -f1)
     HEIGHT=$(echo "$INFO" | cut -d',' -f2)
