@@ -7,12 +7,6 @@ mkdir -p "$DOWNLOAD_DIR"
 # Funciones auxiliares
 # ---------------------------------------------------------
 
-is_audio_only() {
-    ffprobe -v error -select_streams v:0 -show_entries stream=codec_type \
-        -of csv=p=0 "$1" 2>/dev/null | grep -q "video" && return 1
-    return 0
-}
-
 convert_audio() {
     local INPUT="$1"
     local TARGET="$2"
@@ -192,27 +186,46 @@ fi
 # Nombre base y detección de archivo existente
 # ---------------------------------------------------------
 
-BASENAME_RESTRICT=$(echo "$TITLE" | tr ' ' '_' | tr -cd 'A-Za-z0-9._-')
-
-if [ "$QUALITY" = "AUDIO" ]; then
-    EXTS=("webm" "m4a" "opus" "mp3")
-else
-    EXTS=("mkv" "mp4" "webm" "m4a" "opus")
-fi
+# Usamos --get-filename para obtener el nombre exacto que yt-dlp produciría,
+# evitando discrepancias entre nuestra normalización y la de --restrict-filenames
+EXPECTED_FILE=$(yt-dlp \
+    -f "$FORMAT" \
+    -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" \
+    --restrict-filenames \
+    --merge-output-format mkv \
+    --get-filename \
+    "$URL" 2>/dev/null | head -n1)
 
 FOUND_FILE=""
-for BASE in "$TITLE" "$BASENAME_RESTRICT"; do
-    for EXT in "${EXTS[@]}"; do
-        CANDIDATE="$DOWNLOAD_DIR/${BASE}.$EXT"
-        if [ -f "$CANDIDATE" ]; then
-            if [ "$QUALITY" = "AUDIO" ]; then
-                is_audio_only "$CANDIDATE" && FOUND_FILE="$CANDIDATE" && break 2
-            else
-                ! is_audio_only "$CANDIDATE" && FOUND_FILE="$CANDIDATE" && break 2
+BASENAME_RESTRICT=""
+
+if [ -n "$EXPECTED_FILE" ]; then
+    BASENAME_RESTRICT=$(basename "${EXPECTED_FILE%.*}")
+
+    if [ "$QUALITY" = "AUDIO" ]; then
+        # Para audio buscamos el archivo convertido final (mp3/opus)
+        AUDIO_CANDIDATE="$DOWNLOAD_DIR/$BASENAME_RESTRICT.$AUDIO_FORMAT"
+        if [ -f "$AUDIO_CANDIDATE" ]; then
+            HAS_VIDEO=$(ffprobe -v error \
+                -select_streams v:0 \
+                -show_entries stream=codec_type \
+                -of csv=p=0 "$AUDIO_CANDIDATE" 2>/dev/null | grep -q video && echo yes)
+            if [ "$HAS_VIDEO" != "yes" ]; then
+                FOUND_FILE="$AUDIO_CANDIDATE"
             fi
         fi
-    done
-done
+    else
+        # Para video el archivo esperado es exactamente el que yt-dlp produciría
+        if [ -f "$EXPECTED_FILE" ]; then
+            if ffprobe -v error \
+                -select_streams v:0 \
+                -show_entries stream=codec_type \
+                -of csv=p=0 "$EXPECTED_FILE" 2>/dev/null | grep -q video; then
+                FOUND_FILE="$EXPECTED_FILE"
+            fi
+        fi
+    fi
+fi
 
 OVERWRITE_FLAG=""
 if [ -n "$FOUND_FILE" ]; then
@@ -286,7 +299,16 @@ if [ $ZENITY_EXIT -ne 0 ]; then
     wait $YTPID 2>/dev/null
     rm -f "$TMPLOG"
 
-    # Borrar el archivo que yt-dlp alcanzó a crear antes de ser cancelado
+    # Bug fix: borrar .part por nombre conocido, cubre el caso donde el .part
+    # ya existía en BEFORE por una cancelación previa y comm no lo detecta
+    if [ -n "$BASENAME_RESTRICT" ]; then
+        for PART in "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.part \
+                    "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.ytdl; do
+            [ -f "$PART" ] && rm -f "$PART"
+        done
+    fi
+
+    # También borrar cualquier archivo nuevo completo que comm detecte
     AFTER_CANCEL=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
     NEWFILE_CANCEL=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER_CANCEL") | head -n1)
     if [ -n "$NEWFILE_CANCEL" ]; then
