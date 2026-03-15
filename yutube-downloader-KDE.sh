@@ -21,12 +21,6 @@ mkdir -p "$DOWNLOAD_DIR"
 # Funciones auxiliares
 # ---------------------------------------------------------
 
-is_audio_only() {
-    ffprobe -v error -select_streams v:0 -show_entries stream=codec_type \
-        -of csv=p=0 "$1" 2>/dev/null | grep -q "video" && return 1
-    return 0
-}
-
 convert_audio() {
     local INPUT="$1"
     local TARGET="$2"
@@ -273,7 +267,7 @@ fi
 # Snapshot antes (seguro)
 # ---------------------------------------------------------
 
-BEFORE=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n")
+BEFORE=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
 
 # ---------------------------------------------------------
 # progreso KDE
@@ -341,6 +335,18 @@ while kill -0 $YTPID 2>/dev/null; do
     sleep 0.3
 done
 
+# Race condition fix: yt-dlp puede morir justo cuando el usuario cancela,
+# haciendo que el while salga sin haber procesado el wasCancelled de ese tick.
+# Verificamos una última vez ANTES de cerrar el diálogo.
+if [ "$CANCELLED" != true ] && $QDBUS $PROGRESS >/dev/null 2>&1; then
+    LAST_CHECK=$($QDBUS $PROGRESS wasCancelled 2>/dev/null)
+    if [ "$LAST_CHECK" = "true" ]; then
+        CANCELLED=true
+        kill -TERM $READER_PID 2>/dev/null
+        rm -f "$PIPE"
+    fi
+fi
+
 # Cerrar diálogo solo si sigue existiendo
 if $QDBUS $PROGRESS >/dev/null 2>&1; then
     $QDBUS $PROGRESS close
@@ -350,9 +356,9 @@ wait $YTPID 2>/dev/null
 rm -f "$PIPE"
 
 if [ "$CANCELLED" = true ]; then
-    # Detectar archivo nuevo y borrarlo (como hacíamos con zenity)
-    AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n")
-    NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -n1)
+    # Detectar archivo nuevo y borrarlo
+    AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
+    NEWFILE=$(comm -13 <(echo "$BEFORE" | sort) <(echo "$AFTER") | head -n1)
 
     if [ -n "$NEWFILE" ]; then
         rm -f "$DOWNLOAD_DIR/$NEWFILE"
@@ -366,7 +372,7 @@ fi
 # detectar archivo nuevo (seguro)
 # ---------------------------------------------------------
 
-AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n")
+AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
 
 NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -n1)
 
