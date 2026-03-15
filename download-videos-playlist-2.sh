@@ -1,5 +1,4 @@
 #!/bin/bash
-# v3
 
 DOWNLOAD_DIR="$HOME/Videos"
 mkdir -p "$DOWNLOAD_DIR"
