@@ -210,43 +210,44 @@ fi
 # Detectar archivo existente
 # ---------------------------------------------------------
 
-BASENAME_RESTRICT=$(echo "$TITLE" | tr ' ' '_' | tr -cd 'A-Za-z0-9._-')
+# Usamos --get-filename para obtener el nombre exacto que yt-dlp produciría,
+# evitando discrepancias entre nuestra normalización y la de --restrict-filenames
+EXPECTED_FILE=$(yt-dlp \
+    -f "$FORMAT" \
+    -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" \
+    --restrict-filenames \
+    --merge-output-format mkv \
+    --get-filename \
+    "$URL" 2>/dev/null | head -n1)
 
 FOUND_FILE=""
+BASENAME_RESTRICT=""
 
-EXTS=("mkv" "mp4" "webm" "m4a" "opus" "mp3")
+if [ -n "$EXPECTED_FILE" ]; then
+    BASENAME_RESTRICT=$(basename "${EXPECTED_FILE%.*}")
 
-for EXT in "${EXTS[@]}"; do
-    FILE="$DOWNLOAD_DIR/$BASENAME_RESTRICT.$EXT"
-
-    if [ -f "$FILE" ]; then
-
-        if [ "$QUALITY" = "AUDIO" ]; then
-            ACTUAL_CODEC=$(ffprobe -v error \
-                -select_streams a:0 \
-                -show_entries stream=codec_name \
-                -of default=nw=1:nk=1 "$FILE" 2>/dev/null)
-
+    if [ "$QUALITY" = "AUDIO" ]; then
+        # Para audio buscamos el archivo convertido final (mp3/opus)
+        AUDIO_CANDIDATE="$DOWNLOAD_DIR/$BASENAME_RESTRICT.$AUDIO_FORMAT"
+        if [ -f "$AUDIO_CANDIDATE" ]; then
             HAS_VIDEO=$(ffprobe -v error -select_streams v:0 \
                 -show_entries stream=codec_type \
-                -of csv=p=0 "$FILE" 2>/dev/null | grep -q video && echo yes)
-
-            if [ "$HAS_VIDEO" != "yes" ] && \
-               [ "$ACTUAL_CODEC" = "$AUDIO_FORMAT" ]; then
-                FOUND_FILE="$FILE"
-                break
+                -of csv=p=0 "$AUDIO_CANDIDATE" 2>/dev/null | grep -q video && echo yes)
+            if [ "$HAS_VIDEO" != "yes" ]; then
+                FOUND_FILE="$AUDIO_CANDIDATE"
             fi
-
-        else
+        fi
+    else
+        # Para video el archivo esperado es exactamente el que yt-dlp produciría
+        if [ -f "$EXPECTED_FILE" ]; then
             if ffprobe -v error -select_streams v:0 \
                 -show_entries stream=codec_type \
-                -of csv=p=0 "$FILE" 2>/dev/null | grep -q video; then
-                FOUND_FILE="$FILE"
-                break
+                -of csv=p=0 "$EXPECTED_FILE" 2>/dev/null | grep -q video; then
+                FOUND_FILE="$EXPECTED_FILE"
             fi
         fi
     fi
-done
+fi
 
 if [ -n "$FOUND_FILE" ]; then
     kdialog --yesno "Ya existe:
@@ -338,6 +339,8 @@ done
 # Race condition fix: yt-dlp puede morir justo cuando el usuario cancela,
 # haciendo que el while salga sin haber procesado el wasCancelled de ese tick.
 # Verificamos una última vez ANTES de cerrar el diálogo.
+DIALOG_CLOSED_BY_US=false
+
 if [ "$CANCELLED" != true ] && $QDBUS $PROGRESS >/dev/null 2>&1; then
     LAST_CHECK=$($QDBUS $PROGRESS wasCancelled 2>/dev/null)
     if [ "$LAST_CHECK" = "true" ]; then
@@ -350,16 +353,29 @@ fi
 # Cerrar diálogo solo si sigue existiendo
 if $QDBUS $PROGRESS >/dev/null 2>&1; then
     $QDBUS $PROGRESS close
+    DIALOG_CLOSED_BY_US=true
 fi
 
 wait $YTPID 2>/dev/null
 rm -f "$PIPE"
 
+# Si el diálogo desapareció y no fuimos nosotros quienes lo cerramos,
+# el usuario lo canceló justo cuando yt-dlp terminaba (race condition)
+if [ "$CANCELLED" != true ] && [ "$DIALOG_CLOSED_BY_US" != true ]; then
+    CANCELLED=true
+fi
+
 if [ "$CANCELLED" = true ]; then
-    # Detectar archivo nuevo y borrarlo
+    # Bug A fix: borrar .part por nombre conocido, cubre el caso donde el .part
+    # ya existía en BEFORE por una cancelación previa y comm no lo detecta
+    for PART in "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.part \
+                "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.ytdl; do
+        [ -f "$PART" ] && rm -f "$PART"
+    done
+
+    # También borrar cualquier archivo nuevo completo que comm detecte
     AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
     NEWFILE=$(comm -13 <(echo "$BEFORE" | sort) <(echo "$AFTER") | head -n1)
-
     if [ -n "$NEWFILE" ]; then
         rm -f "$DOWNLOAD_DIR/$NEWFILE"
     fi
@@ -389,7 +405,13 @@ FULLPATH="$DOWNLOAD_DIR/$NEWFILE"
 # ---------------------------------------------------------
 
 if [ "$QUALITY" = "AUDIO" ]; then
+    CONV_PROGRESS=$(kdialog --title "Convirtiendo audio" \
+        --progressbar "Convirtiendo a $AUDIO_FORMAT..." 0)
+    $QDBUS $CONV_PROGRESS showCancelButton false
+
     NEWFILE2=$(convert_audio "$FULLPATH" "$AUDIO_FORMAT")
+
+    $QDBUS $CONV_PROGRESS close
 
     if [ -f "$NEWFILE2" ]; then
         rm "$FULLPATH"
