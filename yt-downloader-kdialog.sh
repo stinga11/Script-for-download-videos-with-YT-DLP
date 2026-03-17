@@ -99,9 +99,9 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
             fps=substr($i,1,length($i)-3)
         }
 
-        # FPS como número suelto
-        if($i ~ /^[0-9]+$/ && res!="" && fps==0){
-            fps=$i
+        # FPS como número suelto (columna FPS separada en formato NxN)
+        if($i ~ /^[0-9]+$/ && $i+0 >= 1 && $i+0 <= 240 && res!="" && fps==0){
+            fps=$i+0
         }
 
         if($i ~ /(vp9|avc|h264|av01|av1|hev1|hvc1)/){
@@ -249,6 +249,7 @@ if [ -n "$EXPECTED_FILE" ]; then
     fi
 fi
 
+OVERWRITE_FLAG=""
 if [ -n "$FOUND_FILE" ]; then
     kdialog --yesno "Ya existe:
 
@@ -281,6 +282,9 @@ yt-dlp \
     -f "$FORMAT" \
     -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" \
     --restrict-filenames \
+    --concurrent-fragments 8 \
+    --retries 10 \
+    --fragment-retries 10 \
     --merge-output-format mkv \
     --newline \
     --progress-template "%(progress._percent_str)s" \
@@ -375,7 +379,7 @@ if [ "$CANCELLED" = true ]; then
 
     # También borrar cualquier archivo nuevo completo que comm detecte
     AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
-    NEWFILE=$(comm -13 <(echo "$BEFORE" | sort) <(echo "$AFTER") | head -n1)
+    NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -n1)
     if [ -n "$NEWFILE" ]; then
         rm -f "$DOWNLOAD_DIR/$NEWFILE"
     fi
