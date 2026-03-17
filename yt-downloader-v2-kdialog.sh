@@ -533,6 +533,7 @@ if [ "$QUALITY" = "AUDIO" ]; then
         --menu "Selecciona el formato final:" \
         "${AUDIO_MENU[@]}")
 
+    [ $? -ne 0 ] && exit 0
     [ -z "$AUDIO_CHOICE" ] && exit 0
 
     case "$AUDIO_CHOICE" in
@@ -580,6 +581,7 @@ if [ -n "$EXPECTED_FILE" ]; then
     fi
 fi
 
+OVERWRITE_FLAG=""
 if [ -n "$FOUND_FILE" ]; then
     kdialog --yesno "Ya existe:\n\n$(basename "$FOUND_FILE")\n\n¿Reemplazar?"
 
@@ -695,7 +697,7 @@ if [ "$CANCELLED" = true ]; then
     done
 
     AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
-    NEWFILE=$(comm -13 <(echo "$BEFORE" | sort) <(echo "$AFTER") | head -n1)
+    NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -n1)
     if [ -n "$NEWFILE" ]; then
         rm -f "$DOWNLOAD_DIR/$NEWFILE"
     fi
