@@ -2,7 +2,7 @@
 # ════════════════════════════════════════════════════════════════
 #  Audio Converter — YAD + FFmpeg/FFprobe + CD Ripper
 #  Fix: regex cdparanoia + metadata via gnudb (freedb)
-#  Requiere: yad, ffmpeg, ffprobe, cdparanoia, cd-discid, curl, bc
+#  Requiere: yad, ffmpeg, ffprobe, cdparanoia, cd-discid, curl
 # ════════════════════════════════════════════════════════════════
 
 CONFIG_DIR="$HOME/.config/audio_converter"
