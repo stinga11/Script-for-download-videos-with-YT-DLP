@@ -295,45 +295,85 @@ if [[ "$MODE" == *"Archivos locales"* ]]; then
     IFS='|' read -ra RAW_LIST <<< "$INPUT_RAW"
     INPUT_FILES=()
     for f in "${RAW_LIST[@]}"; do
-        f=$(echo "$f" | xargs)
+        f="${f#"${f%%[![:space:]]*}"}"   # trim leading spaces
+        f="${f%"${f##*[![:space:]]}"}"    # trim trailing spaces
         [[ -f "$f" ]] && INPUT_FILES+=("$f")
     done
     [[ ${#INPUT_FILES[@]} -eq 0 ]] && exit 1
     FILE_COUNT=${#INPUT_FILES[@]}
 
-    INFO_TEXT="<b>Archivos seleccionados: $FILE_COUNT</b>\n\n"
+    # Construir lista para yad --list (una fila por archivo)
+    INFO_ROWS=()
     for f in "${INPUT_FILES[@]}"; do
-        FNAME=$(basename "$f")
-        RAW=$(ffprobe -v error \
-            -show_entries format=duration,bit_rate,size \
-            -show_entries stream=codec_name,sample_rate,channels \
-            -of default=noprint_wrappers=1 "$f" 2>/dev/null)
-        F_DUR=$(  echo "$RAW" | grep "^duration="    | head -1 | cut -d= -f2)
-        F_BR=$(   echo "$RAW" | grep "^bit_rate="    | head -1 | cut -d= -f2)
-        F_CODEC=$(echo "$RAW" | grep "^codec_name="  | head -1 | cut -d= -f2)
-        F_SR=$(   echo "$RAW" | grep "^sample_rate=" | head -1 | cut -d= -f2)
-        F_CH=$(   echo "$RAW" | grep "^channels="    | head -1 | cut -d= -f2)
-        F_SIZE=$( echo "$RAW" | grep "^size="        | head -1 | cut -d= -f2)
-        DI=${F_DUR%.*}
-        [[ "$DI" =~ ^[0-9]+$ ]] && DUR_STR="$((DI/60))m $((DI%60))s" || DUR_STR="N/A"
-        [[ "$F_BR" =~ ^[0-9]+$ ]] && BR_STR="$((F_BR/1000)) kbps" || BR_STR="N/A"
-        if [[ "$F_SIZE" =~ ^[0-9]+$ ]]; then
-            KB=$((F_SIZE/1024))
-            [[ $KB -gt 1024 ]] && SIZE_STR="$(echo "scale=1; $KB/1024" | bc) MB" || SIZE_STR="${KB} KB"
-        else SIZE_STR="N/A"; fi
-        case "$F_CH" in 1) CH_STR="Mono";; 2) CH_STR="Estéreo";; 6) CH_STR="5.1";; *) CH_STR="${F_CH:-?}ch";; esac
-        INFO_TEXT+="  📄 <b>$FNAME</b>\n"
-        INFO_TEXT+="     Códec: <b>${F_CODEC:-N/A}</b>  |  Duración: <b>$DUR_STR</b>  |  Bitrate: <b>$BR_STR</b>\n"
-        INFO_TEXT+="     Sample rate: <b>${F_SR:-N/A} Hz</b>  |  Canales: <b>$CH_STR</b>  |  Tamaño: <b>$SIZE_STR</b>\n\n"
+        BNAME=$(basename "$f")
+        RAW2=$(ffprobe -v error             -show_entries format=duration,size             -show_entries stream=codec_name             -of default=noprint_wrappers=1 "$f" 2>/dev/null)
+        F_DUR2=$(echo "$RAW2" | grep "^duration=" | head -1 | cut -d= -f2)
+        F_SIZE2=$(echo "$RAW2" | grep "^size="    | head -1 | cut -d= -f2)
+        F_COD2=$(echo "$RAW2"  | grep "^codec_name=" | head -1 | cut -d= -f2)
+        DI2=${F_DUR2%.*}
+        [[ "$DI2" =~ ^[0-9]+$ ]] && DUR2="$((DI2/60))m $((DI2%60))s" || DUR2="N/A"
+        if [[ "$F_SIZE2" =~ ^[0-9]+$ ]]; then
+            KB2=$((F_SIZE2/1024))
+            if [[ $KB2 -gt 1024 ]]; then
+                MB_INT2=$(( KB2 / 1024 ))
+                MB_DEC2=$(( (KB2 % 1024) * 10 / 1024 ))
+                SZ2="${MB_INT2}.${MB_DEC2} MB"
+            else
+                SZ2="${KB2} KB"
+            fi
+        else
+            SZ2="N/A"
+        fi
+        INFO_ROWS+=("TRUE" "$BNAME" "${F_COD2:-N/A}" "$DUR2" "$SZ2")
     done
 
-    yad --info \
-        --title="🎵 Paso 2 — Info de Archivos" \
-        --text="$INFO_TEXT" \
-        --width=640 --height=420 \
+    # Paso 2: checklist para confirmar/deseleccionar archivos
+    SELECTED_FILES_RAW=$(yad --list \
+        --title="🎵 Paso 2 — Confirmar Archivos (${FILE_COUNT} archivos)" \
+        --text="<b>Confirma los archivos a convertir:</b>\n<i>Desmarca los que no quieras incluir</i>" \
+        --checklist \
+        --column="✔" \
+        --column="Nombre" \
+        --column="Códec" \
+        --column="Duración" \
+        --column="Tamaño" \
+        "${INFO_ROWS[@]}" \
+        --print-column=2 \
+        --width=820 --height=460 \
         --button="gtk-cancel:1" \
-        --button="Continuar ▶:0" 2>/dev/null
-    [[ $? -ne 0 ]] && exit 0
+        --button="☑  Todas:2" \
+        --button="Continuar ▶:0" 2>/dev/null)
+
+    BTN_FILES=$?
+    [[ $BTN_FILES -eq 1 ]] && exit 0
+
+    if [[ $BTN_FILES -eq 2 ]]; then
+        FINAL_FILES=("${INPUT_FILES[@]}")
+    else
+        FINAL_FILES=()
+        while IFS= read -r sel_name; do
+            sel_name="${sel_name//|/}"              # strip pipes
+            sel_name="${sel_name#"${sel_name%%[![:space:]]*}"}"
+            sel_name="${sel_name%"${sel_name##*[![:space:]]}"}"
+            [[ -z "$sel_name" ]] && continue
+            for orig in "${INPUT_FILES[@]}"; do
+                if [[ "$(basename "$orig")" == "$sel_name" ]]; then
+                    FINAL_FILES+=("$orig")
+                    break
+                fi
+            done
+        done <<< "$SELECTED_FILES_RAW"
+    fi
+
+    if [[ ${#FINAL_FILES[@]} -eq 0 ]]; then
+        yad --warning --title="Sin archivos" \
+            --text="No seleccionaste ningún archivo." \
+            --width=360 --button="OK:0" 2>/dev/null
+        exit 0
+    fi
+
+    INPUT_FILES=("${FINAL_FILES[@]}")
+    FILE_COUNT=${#INPUT_FILES[@]}
 
     select_format  || exit 0
     select_quality || exit 0
@@ -530,7 +570,8 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
         # SELECTED_RAW tiene formato "1|\n2|\n3|..." — normalizar y parsear
         SEL_TRACKS=()
         while IFS= read -r t; do
-            t=$(echo "$t" | tr -d '|' | xargs)
+            t="${t//|/}"
+            t="${t#"${t%%[![:space:]]*}"}"
             [[ -n "$t" ]] && SEL_TRACKS+=("$t")
         done <<< "$SELECTED_RAW"
     fi
