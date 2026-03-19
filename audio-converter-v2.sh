@@ -1,6 +1,6 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════════════
-#  Audio Converter v3 — YAD + FFmpeg/FFprobe + CD Ripper
+#  Audio Converter — YAD + FFmpeg/FFprobe + CD Ripper
 #  Fix: regex cdparanoia + metadata via gnudb (freedb)
 #  Requiere: yad, ffmpeg, ffprobe, cdparanoia, cd-discid, curl, bc
 # ════════════════════════════════════════════════════════════════
@@ -19,7 +19,7 @@ LAST_DIR="$HOME"
 #  MENÚ PRINCIPAL
 # ════════════════════════════════════════════════════════════════
 MODE=$(yad --list \
-    --title="🎵 Audio Converter v3" \
+    --title="🎵 Audio Converter" \
     --text="<b>¿Qué deseas convertir?</b>" \
     --column="Modo" \
     --column="Descripción" \
@@ -40,7 +40,7 @@ MODE=$(echo "$MODE" | tr -d '|' | xargs)
 
 select_format() {
     FORMAT_RAW=$(yad --list \
-        --title="🎵 Audio Converter v3 — Formato de Salida" \
+        --title="🎵 Audio Converter — Formato de Salida" \
         --text="<b>Selecciona el formato al que deseas convertir:</b>" \
         --column="Ext" \
         --column="Nombre Completo" \
@@ -70,7 +70,7 @@ select_quality() {
     case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
     if [[ "$IS_LOSSLESS" == "false" ]]; then
         QUALITY_RAW=$(yad --list \
-            --title="🎵 Audio Converter v3 — Calidad de Audio" \
+            --title="🎵 Audio Converter — Calidad de Audio" \
             --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
             --column="Bitrate" \
             --column="Calidad" \
@@ -93,7 +93,7 @@ select_quality() {
 
 select_output_dir() {
     OUTPUT_DIR=$(yad --file \
-        --title="🎵 Audio Converter v3 — Carpeta de Destino" \
+        --title="🎵 Audio Converter — Carpeta de Destino" \
         --text="<b>Selecciona la carpeta donde se guardarán los archivos:</b>" \
         --directory \
         --filename="$LAST_DIR/" \
@@ -480,7 +480,7 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
     OFFSETS_QUERY=$(IFS=+; echo "${OFFSETS[*]}")
 
     GNUDB_QUERY="cmd=cddb+query+${DISCID_HEX}+${NUM_TRACKS_ID}+${OFFSETS_QUERY}+${TOTAL_SECS}"
-    GNUDB_HELLO="hello=user+localhost+AudioConverterV3+1.0"
+    GNUDB_HELLO="hello=user+localhost+AudioConverter+1.0"
     GNUDB_URL="http://gnudb.gnudb.org/~cddb/cddb.cgi?${GNUDB_QUERY}&${GNUDB_HELLO}&proto=6"
     GNUDB_RESULT=$(curl -s --max-time 10 "$GNUDB_URL" 2>/dev/null)
 
