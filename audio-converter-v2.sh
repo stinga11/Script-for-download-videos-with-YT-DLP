@@ -2,7 +2,7 @@
 # ════════════════════════════════════════════════════════════════
 #  Audio Converter — YAD + FFmpeg/FFprobe + CD Ripper
 #  Fix: regex cdparanoia + metadata via gnudb (freedb)
-#  Requiere: yad, ffmpeg, ffprobe, cdparanoia, cd-discid, curl
+#  Requiere: yad, ffmpeg, ffprobe, cdparanoia, cd-discid, curl, bc
 # ════════════════════════════════════════════════════════════════
 
 CONFIG_DIR="$HOME/.config/audio_converter"
@@ -10,6 +10,33 @@ CONFIG_FILE="$CONFIG_DIR/settings.conf"
 HISTORY_FILE="$CONFIG_DIR/history.log"
 TEMP_DIR=$(mktemp -d /tmp/audioconv_XXXXXX)
 mkdir -p "$CONFIG_DIR"
+
+# ════════════════════════════════════════════════════════════════
+#  VERIFICACIÓN DE DEPENDENCIAS
+# ════════════════════════════════════════════════════════════════
+MISSING_DEPS=()
+for dep in yad ffmpeg ffprobe curl iconv; do
+    command -v "$dep" &>/dev/null || MISSING_DEPS+=("$dep")
+done
+# cd-discid y cdparanoia solo son necesarios para el modo CD
+for dep in cdparanoia cd-discid; do
+    command -v "$dep" &>/dev/null || MISSING_DEPS+=("$dep (necesario para ripear CDs)")
+done
+
+if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
+    MSG="<b>❌ Faltan dependencias necesarias:</b>
+
+"
+    for d in "${MISSING_DEPS[@]}"; do
+        MSG+="  • $d
+"
+    done
+    MSG+="
+<i>Instálalas antes de continuar.</i>"
+    yad --error --title="Dependencias faltantes" --text="$MSG"         --width=420 --button="OK:0" 2>/dev/null
+    exit 1
+fi
+
 trap 'rm -rf "$TEMP_DIR"; [[ -n "$CD_DEV" && "$MODE" == *"CD de audio"* ]] && eject "$CD_DEV" 2>/dev/null' EXIT
 
 LAST_DIR="$HOME"
@@ -277,6 +304,14 @@ resolve_conflict() {
 }
 
 # ════════════════════════════════════════════════════════════════
+#  FUNCIÓN: Limpiar nombres para uso seguro en sistema de archivos
+#  Permite letras, números, puntos, guiones y espacios. El resto → guión.
+# ════════════════════════════════════════════════════════════════
+clean_filename() {
+    echo "$1" | sed 's/[/:*?"<>|\\]/-/g'
+}
+
+# ════════════════════════════════════════════════════════════════
 #  MODO A — ARCHIVOS LOCALES
 # ════════════════════════════════════════════════════════════════
 if [[ "$MODE" == *"Archivos locales"* ]]; then
@@ -313,14 +348,7 @@ if [[ "$MODE" == *"Archivos locales"* ]]; then
         DI2=${F_DUR2%.*}
         [[ "$DI2" =~ ^[0-9]+$ ]] && DUR2="$((DI2/60))m $((DI2%60))s" || DUR2="N/A"
         if [[ "$F_SIZE2" =~ ^[0-9]+$ ]]; then
-            KB2=$((F_SIZE2/1024))
-            if [[ $KB2 -gt 1024 ]]; then
-                MB_INT2=$(( KB2 / 1024 ))
-                MB_DEC2=$(( (KB2 % 1024) * 10 / 1024 ))
-                SZ2="${MB_INT2}.${MB_DEC2} MB"
-            else
-                SZ2="${KB2} KB"
-            fi
+            SZ2=$(numfmt --to=iec --suffix=B "$F_SIZE2" 2>/dev/null || echo "N/A")
         else
             SZ2="N/A"
         fi
@@ -480,9 +508,9 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
     OFFSETS_QUERY=$(IFS=+; echo "${OFFSETS[*]}")
 
     GNUDB_QUERY="cmd=cddb+query+${DISCID_HEX}+${NUM_TRACKS_ID}+${OFFSETS_QUERY}+${TOTAL_SECS}"
-    GNUDB_HELLO="hello=user+localhost+AudioConverter+1.0"
+    GNUDB_HELLO="hello=$(whoami)+$(hostname)+AudioConverter+1.0"
     GNUDB_URL="http://gnudb.gnudb.org/~cddb/cddb.cgi?${GNUDB_QUERY}&${GNUDB_HELLO}&proto=6"
-    GNUDB_RESULT=$(curl -s --max-time 10 "$GNUDB_URL" 2>/dev/null)
+    GNUDB_RESULT=$(curl -sL -A "AudioConverter/1.0" --max-time 10 "$GNUDB_URL" 2>/dev/null)
 
     ARTIST="Desconocido"
     ALBUM="CD de Audio"
@@ -503,7 +531,9 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
             fi
 
             READ_URL="http://gnudb.gnudb.org/~cddb/cddb.cgi?cmd=cddb+read+${CDDB_CAT}+${CDDB_ID}&${GNUDB_HELLO}&proto=6"
-            CDDB_ENTRY=$(curl -s --max-time 10 "$READ_URL" 2>/dev/null)
+            CDDB_ENTRY=$(curl -sL -A "AudioConverter/1.0" --max-time 10 "$READ_URL" 2>/dev/null)
+            # Convertir de ISO-8859-1 a UTF-8 por si gnudb devuelve encoding antiguo
+            CDDB_ENTRY=$(echo "$CDDB_ENTRY" | iconv -f iso-8859-1 -t utf-8 2>/dev/null || echo "$CDDB_ENTRY")
 
             if [[ -n "$CDDB_ENTRY" ]]; then
                 DTITLE=$(echo "$CDDB_ENTRY" | grep "^DTITLE=" | head -1 | cut -d= -f2-)
@@ -610,7 +640,7 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
     select_quality || exit 0
     select_output_dir || exit 0
 
-    SAFE_ALBUM=$(echo "$ALBUM" | tr '/:*?"<>|\\' '_')
+    SAFE_ALBUM=$(clean_filename "$ALBUM")
     ALBUM_DIR="$OUTPUT_DIR/$SAFE_ALBUM"
     mkdir -p "$ALBUM_DIR"
 
@@ -620,7 +650,7 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
     for TNUM in "${SEL_TRACKS[@]}"; do
         TRACK_IDX=$((CONVERTED + FAILED + 1))
         TNAME="${TRACK_NAMES[$TNUM]:-Pista $TNUM}"
-        SAFE_TNAME=$(echo "$TNAME" | tr '/:*?"<>|\\' '_')
+        SAFE_TNAME=$(clean_filename "$TNAME")
         TRACK_FILENAME=$(printf "%02d - %s" "$TNUM" "$SAFE_TNAME")
         WAV_FILE="$TEMP_DIR/track${TNUM}.wav"
         OUTPUT_FILE="$ALBUM_DIR/$TRACK_FILENAME.$FORMAT"
@@ -637,6 +667,8 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
         RIP_LOG="$TEMP_DIR/rip_${TNUM}.log"
         RIP_PIPE=$(mktemp -u /tmp/audioconv_RIP_XXXXXX)
         mkfifo "$RIP_PIPE"
+        # Asegurar limpieza del pipe si yad se cierra forzosamente
+        trap "rm -f '$RIP_PIPE'" PIPE
 
         cdparanoia ${CDPARA_FLAGS} -d "$CD_DEV" "$TNUM" "$WAV_FILE" \
             > "$RIP_LOG" 2>&1 &
@@ -698,13 +730,16 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
         # ── Incrustar metadata ───────────────────────────────────
         if [[ $CONV_RESULT -eq 0 ]]; then
             TMP_META="$TEMP_DIR/meta_${TNUM}.$FORMAT"
-            META_ARGS=(-metadata title="$TNAME"
-                       -metadata artist="$ARTIST"
-                       -metadata album="$ALBUM"
-                       -metadata track="$TNUM")
-            [[ -n "$YEAR" ]] && META_ARGS+=(-metadata date="$YEAR")
-            ffmpeg -y -i "$OUTPUT_FILE" "${META_ARGS[@]}" -codec copy \
-                   "$TMP_META" >/dev/null 2>&1 \
+            META_ARGS=(
+                -metadata "title=$TNAME"
+                -metadata "artist=$ARTIST"
+                -metadata "album=$ALBUM"
+                -metadata "track=$TNUM"
+            )
+            [[ -n "$YEAR" ]] && META_ARGS+=(-metadata "date=$YEAR")
+            ffmpeg -hide_banner -loglevel error -y \
+                   -i "$OUTPUT_FILE" "${META_ARGS[@]}" -codec copy \
+                   "$TMP_META" \
                 && mv "$TMP_META" "$OUTPUT_FILE" \
                 || rm -f "$TMP_META"
 
