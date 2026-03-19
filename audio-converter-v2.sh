@@ -8,8 +8,18 @@
 CONFIG_DIR="$HOME/.config/audio_converter"
 CONFIG_FILE="$CONFIG_DIR/settings.conf"
 HISTORY_FILE="$CONFIG_DIR/history.log"
+CACHE_DIR="$CONFIG_DIR/cddb_cache"
 TEMP_DIR=$(mktemp -d /tmp/audioconv_XXXXXX)
-mkdir -p "$CONFIG_DIR"
+mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
+
+# ════════════════════════════════════════════════════════════════
+#  FUNCIÓN DE LIMPIEZA Y TRAP
+# ════════════════════════════════════════════════════════════════
+cleanup() {
+    rm -rf "$TEMP_DIR"
+    [[ -n "$CD_DEV" && "$MODE" == *"CD de audio"* ]] && eject "$CD_DEV" 2>/dev/null
+}
+trap cleanup EXIT HUP INT TERM
 
 # ════════════════════════════════════════════════════════════════
 #  VERIFICACIÓN DE DEPENDENCIAS
@@ -37,7 +47,6 @@ if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
     exit 1
 fi
 
-trap 'rm -rf "$TEMP_DIR"; [[ -n "$CD_DEV" && "$MODE" == *"CD de audio"* ]] && eject "$CD_DEV" 2>/dev/null' EXIT
 
 LAST_DIR="$HOME"
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
@@ -149,10 +158,10 @@ convert_file() {
     mkfifo "$PIPE"
 
     if [[ "$IS_LOSSLESS" == "true" ]]; then
-        ffmpeg -y -i "$INPUT_FILE" -progress "$PIPE" -nostats \
+        ffmpeg -y -threads auto -i "$INPUT_FILE" -progress "$PIPE" -nostats \
                "$OUTPUT_FILE" >/dev/null 2>&1 &
     else
-        ffmpeg -y -i "$INPUT_FILE" -b:a "$BITRATE_OPT" -progress "$PIPE" -nostats \
+        ffmpeg -y -threads auto -i "$INPUT_FILE" -b:a "$BITRATE_OPT" -progress "$PIPE" -nostats \
                "$OUTPUT_FILE" >/dev/null 2>&1 &
     fi
     FFMPEG_PID=$!
@@ -169,7 +178,7 @@ convert_file() {
                 local T="${BASH_REMATCH[1]}"
                 if [[ $DUR_INT -gt 0 ]]; then
                     PCT=$(( T / (DUR_INT * 10000) ))
-                    [[ $PCT -gt 99 ]] && PCT=99
+                    [[ $PCT -ge 100 ]] && PCT=99
                 else
                     PCT=$(( (PCT + 1) % 98 ))
                 fi
@@ -510,7 +519,13 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
     GNUDB_QUERY="cmd=cddb+query+${DISCID_HEX}+${NUM_TRACKS_ID}+${OFFSETS_QUERY}+${TOTAL_SECS}"
     GNUDB_HELLO="hello=$(whoami)+$(hostname)+AudioConverter+1.0"
     GNUDB_URL="http://gnudb.gnudb.org/~cddb/cddb.cgi?${GNUDB_QUERY}&${GNUDB_HELLO}&proto=6"
-    GNUDB_RESULT=$(curl -sL -A "AudioConverter/1.0" --max-time 10 "$GNUDB_URL" 2>/dev/null)
+    # Usar caché local para no consultar gnudb si el disco ya fue procesado
+    if [[ -f "$CACHE_DIR/$DISCID_HEX" ]]; then
+        GNUDB_RESULT=$(cat "$CACHE_DIR/$DISCID_HEX")
+    else
+        GNUDB_RESULT=$(curl -sL -A "AudioConverter/1.0" --max-time 10 "$GNUDB_URL" 2>/dev/null)
+        [[ -n "$GNUDB_RESULT" ]] && echo "$GNUDB_RESULT" > "$CACHE_DIR/$DISCID_HEX"
+    fi
 
     ARTIST="Desconocido"
     ALBUM="CD de Audio"
@@ -532,8 +547,12 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
 
             READ_URL="http://gnudb.gnudb.org/~cddb/cddb.cgi?cmd=cddb+read+${CDDB_CAT}+${CDDB_ID}&${GNUDB_HELLO}&proto=6"
             CDDB_ENTRY=$(curl -sL -A "AudioConverter/1.0" --max-time 10 "$READ_URL" 2>/dev/null)
-            # Convertir de ISO-8859-1 a UTF-8 por si gnudb devuelve encoding antiguo
-            CDDB_ENTRY=$(echo "$CDDB_ENTRY" | iconv -f iso-8859-1 -t utf-8 2>/dev/null || echo "$CDDB_ENTRY")
+            # Eliminar \r (gnudb usa line endings Windows \r\n)
+            CDDB_ENTRY=$(printf '%s' "$CDDB_ENTRY" | tr -d '\r')
+            # Usar iconv solo si el texto no es UTF-8 valido (CDs con encoding antiguo)
+            if ! printf '%s' "$CDDB_ENTRY" | iconv -f utf-8 -t utf-8 >/dev/null 2>&1; then
+                CDDB_ENTRY=$(printf '%s' "$CDDB_ENTRY" | iconv -f iso-8859-1 -t utf-8 2>/dev/null || printf '%s' "$CDDB_ENTRY")
+            fi
 
             if [[ -n "$CDDB_ENTRY" ]]; then
                 DTITLE=$(echo "$CDDB_ENTRY" | grep "^DTITLE=" | head -1 | cut -d= -f2-)
@@ -754,8 +773,9 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
 
     OUTPUT_DIR="$ALBUM_DIR"
     show_final_dialog "$CONVERTED" "$FAILED" "$TOTAL_SEL" "${CONVERTED_FILES[@]}"
-    # Expulsar el CD al terminar
+    # Expulsar el CD al terminar (limpiar CD_DEV para que cleanup no lo expulse de nuevo)
     eject "$CD_DEV" 2>/dev/null
+    CD_DEV=""
 
 fi
 
