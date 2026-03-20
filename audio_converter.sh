@@ -1,24 +1,182 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════════════
-#  Audio Converter v2 — YAD + FFmpeg/FFprobe
-#  Mejoras: lote, calidad/bitrate, historial, vista previa info
-#  Requiere: yad, ffmpeg, ffprobe, bc, xdg-open
+#  Audio Converter v1 — YAD + FFmpeg/FFprobe
+#  Convierte archivos de audio locales en lote
+#  Requiere: yad, ffmpeg, ffprobe, numfmt (coreutils)
 # ════════════════════════════════════════════════════════════════
 
 CONFIG_DIR="$HOME/.config/audio_converter"
 CONFIG_FILE="$CONFIG_DIR/settings.conf"
 HISTORY_FILE="$CONFIG_DIR/history.log"
+TEMP_DIR=$(mktemp -d /tmp/audioconv_XXXXXX)
 mkdir -p "$CONFIG_DIR"
+
+# ════════════════════════════════════════════════════════════════
+#  FUNCIÓN DE LIMPIEZA Y TRAP
+# ════════════════════════════════════════════════════════════════
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT HUP INT TERM
+
+# ════════════════════════════════════════════════════════════════
+#  VERIFICACIÓN DE DEPENDENCIAS
+# ════════════════════════════════════════════════════════════════
+MISSING_DEPS=()
+for dep in yad ffmpeg ffprobe; do
+    command -v "$dep" &>/dev/null || MISSING_DEPS+=("$dep")
+done
+
+if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
+    MSG="<b>❌ Faltan dependencias necesarias:</b>\n\n"
+    for d in "${MISSING_DEPS[@]}"; do
+        MSG+="  • $d\n"
+    done
+    MSG+="\n<i>Instálalas antes de continuar.</i>"
+    yad --error --title="Dependencias faltantes" --text="$MSG" \
+        --width=420 --button="OK:0" 2>/dev/null
+    exit 1
+fi
 
 # ─── Cargar última carpeta usada ─────────────────────────────────
 LAST_DIR="$HOME"
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
 # ════════════════════════════════════════════════════════════════
+#  FUNCIÓN: Limpiar nombres para uso seguro en sistema de archivos
+# ════════════════════════════════════════════════════════════════
+clean_filename() {
+    echo "$1" | sed 's/[/:*?"<>|\\]/-/g'
+}
+
+# ════════════════════════════════════════════════════════════════
+#  FUNCIÓN: Resolver conflictos de nombre de archivo
+# ════════════════════════════════════════════════════════════════
+SKIP_FILE=false
+resolve_conflict() {
+    local EXISTING="$1"
+    local FNAME="$2"
+    local FMT="$3"
+    local DIR="$4"
+    SKIP_FILE=false
+
+    ACTION=$(yad --list \
+        --title="⚠ Archivo ya existe" \
+        --text="<b>El archivo ya existe:</b>\n\n  <i>$(basename "$EXISTING")</i>\n\n<b>¿Qué deseas hacer?</b>" \
+        --column="Acción" \
+        --column="Descripción" \
+        "Reemplazar" "Sobreescribir el archivo existente" \
+        "Renombrar"  "Guardar con nombre alternativo" \
+        "Omitir"     "No convertir este archivo" \
+        --print-column=1 \
+        --width=500 --height=260 \
+        --button="Confirmar:0" 2>/dev/null | tr -d '|' | xargs)
+
+    case "$ACTION" in
+        Reemplazar)
+            # Sin cambios, OUTPUT_FILE sigue igual
+            ;;
+        Renombrar)
+            local COUNTER=1
+            while [[ -f "$DIR/${FNAME}_${COUNTER}.$FMT" ]]; do
+                ((COUNTER++))
+            done
+            OUTPUT_FILE="$DIR/${FNAME}_${COUNTER}.$FMT"
+            ;;
+        Omitir|"")
+            SKIP_FILE=true
+            ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════════
+#  FUNCIÓN: Convertir un archivo con barra de progreso real
+# ════════════════════════════════════════════════════════════════
+convert_file() {
+    local INPUT_FILE="$1"
+    local OUTPUT_FILE="$2"
+    local FILE_NUM="$3"
+    local FILE_COUNT="$4"
+
+    local BASENAME
+    BASENAME=$(basename "$INPUT_FILE")
+
+    # Obtener duración para calcular porcentaje
+    local RAW_DUR
+    RAW_DUR=$(ffprobe -v error \
+        -show_entries format=duration \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$INPUT_FILE" 2>/dev/null)
+    local DUR_INT="${RAW_DUR%.*}"
+    [[ -z "$DUR_INT" || ! "$DUR_INT" =~ ^[0-9]+$ || "$DUR_INT" -le 0 ]] && DUR_INT=0
+
+    local PIPE
+    PIPE=$(mktemp -u "$TEMP_DIR/pipe_XXXXXX")
+    mkfifo "$PIPE"
+
+    # Lanzar ffmpeg en background
+    local QUALITY_LABEL="$FORMAT"
+    [[ -n "$BITRATE_OPT" ]] && QUALITY_LABEL="$FORMAT @ $BITRATE_OPT"
+
+    if [[ "$IS_LOSSLESS" == "true" ]]; then
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$INPUT_FILE" -progress "$PIPE" -nostats \
+               "$OUTPUT_FILE" &
+    else
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$INPUT_FILE" -b:a "$BITRATE_OPT" -progress "$PIPE" -nostats \
+               "$OUTPUT_FILE" &
+    fi
+    local FFMPEG_PID=$!
+
+    # Subshell: lee progreso y lo pasa a yad
+    (
+        local PCT=0
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^out_time_ms=([0-9]+)$ ]]; then
+                local T="${BASH_REMATCH[1]}"
+                if [[ $DUR_INT -gt 0 ]]; then
+                    PCT=$(( T / (DUR_INT * 10000) ))
+                    [[ $PCT -ge 100 ]] && PCT=99
+                else
+                    PCT=$(( (PCT + 1) % 98 ))
+                fi
+                echo "$PCT"
+            fi
+            [[ "$line" == "progress=end" ]] && echo "100" && break
+        done < "$PIPE"
+    ) | yad --progress \
+        --title="🔄 Convirtiendo ($FILE_NUM / $FILE_COUNT)..." \
+        --text="<b>Archivo $FILE_NUM de $FILE_COUNT</b>\n\n  <b>Archivo:</b>  <i>$BASENAME</i>\n  <b>Calidad:</b>  $QUALITY_LABEL\n  <b>Destino:</b>  <i>$OUTPUT_DIR</i>" \
+        --percentage=0 \
+        --auto-close \
+        --width=560 \
+        --button="⛔  Cancelar:1" 2>/dev/null
+
+    local YAD_EXIT=$?
+    rm -f "$PIPE"
+
+    # Cancelación por el usuario
+    if [[ $YAD_EXIT -ne 0 ]]; then
+        kill "$FFMPEG_PID" 2>/dev/null
+        wait "$FFMPEG_PID" 2>/dev/null
+        rm -f "$OUTPUT_FILE"
+        yad --warning \
+            --title="Conversión cancelada" \
+            --text="<b>⚠ Conversión cancelada.</b>\n\nEl archivo parcial fue eliminado." \
+            --width=420 --button="OK:0" 2>/dev/null
+        exit 0
+    fi
+
+    wait "$FFMPEG_PID"
+    return $?
+}
+
+# ════════════════════════════════════════════════════════════════
 #  PASO 1 — Seleccionar archivos (soporte multi-archivo)
 # ════════════════════════════════════════════════════════════════
 INPUT_RAW=$(yad --file \
-    --title="🎵 Audio Converter v2 — Paso 1/5: Seleccionar Archivos" \
+    --title="🎵 Audio Converter — Seleccionar Archivos" \
     --text="<b>Selecciona uno o varios archivos de audio:</b>\n<i>Mantén Ctrl o Shift para seleccionar varios</i>" \
     --multiple \
     --file-filter="Archivos de Audio|*.mp3 *.aac *.flac *.ogg *.wav *.opus *.wma *.m4a *.aiff *.mp2 *.webm *.mkv" \
@@ -29,11 +187,12 @@ INPUT_RAW=$(yad --file \
 
 [[ $? -ne 0 || -z "$INPUT_RAW" ]] && exit 0
 
-# Parsear archivos separados por | y validar que existen
+# Parsear archivos separados por | — igual que v3, robusto con apóstrofes y caracteres especiales
 IFS='|' read -ra RAW_LIST <<< "$INPUT_RAW"
 INPUT_FILES=()
 for f in "${RAW_LIST[@]}"; do
-    f=$(echo "$f" | xargs)
+    f="${f#"${f%%[![:space:]]*}"}"   # trim leading spaces
+    f="${f%"${f##*[![:space:]]}"}"   # trim trailing spaces
     [[ -f "$f" ]] && INPUT_FILES+=("$f")
 done
 
@@ -43,84 +202,87 @@ if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
         --width=380 --button="OK:0" 2>/dev/null
     exit 1
 fi
-FILE_COUNT=${#INPUT_FILES[@]}
 
 # ════════════════════════════════════════════════════════════════
-#  PASO 2 — Vista previa: info de archivos con ffprobe
+#  PASO 2 — Checklist interactivo: confirmar/deseleccionar archivos
 # ════════════════════════════════════════════════════════════════
-INFO_TEXT="<b>Archivos seleccionados: $FILE_COUNT</b>\n\n"
-
+INFO_ROWS=()
 for f in "${INPUT_FILES[@]}"; do
-    FNAME=$(basename "$f")
+    BNAME=$(basename "$f")
 
-    # Extraer metadatos con ffprobe
-    RAW=$(ffprobe -v error \
-        -show_entries format=duration,bit_rate,size \
-        -show_entries stream=codec_name,sample_rate,channels \
-        -of default=noprint_wrappers=1 "$f" 2>/dev/null)
-
-    F_DUR=$(  echo "$RAW" | grep "^duration="   | head -1 | cut -d= -f2)
-    F_BR=$(   echo "$RAW" | grep "^bit_rate="   | head -1 | cut -d= -f2)
-    F_CODEC=$(echo "$RAW" | grep "^codec_name=" | head -1 | cut -d= -f2)
-    F_SR=$(   echo "$RAW" | grep "^sample_rate="| head -1 | cut -d= -f2)
-    F_CH=$(   echo "$RAW" | grep "^channels="   | head -1 | cut -d= -f2)
-    F_SIZE=$( echo "$RAW" | grep "^size="       | head -1 | cut -d= -f2)
+    # Extraer info básica con ffprobe
+    F_COD2=$(ffprobe -v error -show_entries stream=codec_name \
+        -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1)
+    RAW_DUR2=$(ffprobe -v error -show_entries format=duration \
+        -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
+    F_SIZE2=$(ffprobe -v error -show_entries format=size \
+        -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
 
     # Formatear duración
-    if [[ -n "$F_DUR" && "$F_DUR" != "N/A" ]]; then
-        DI=${F_DUR%.*}
-        DUR_STR="$((DI/60))m $((DI%60))s"
+    if [[ -n "$RAW_DUR2" && "$RAW_DUR2" =~ ^[0-9] ]]; then
+        DI2=${RAW_DUR2%.*}
+        DUR2="$((DI2/60))m $((DI2%60))s"
     else
-        DUR_STR="N/A"
+        DUR2="N/A"
     fi
 
-    # Formatear bitrate
-    if [[ -n "$F_BR" && "$F_BR" =~ ^[0-9]+$ ]]; then
-        BR_STR="$((F_BR/1000)) kbps"
+    # Formatear tamaño con numfmt
+    if [[ "$F_SIZE2" =~ ^[0-9]+$ ]]; then
+        SZ2=$(numfmt --to=iec --suffix=B "$F_SIZE2" 2>/dev/null || echo "N/A")
     else
-        BR_STR="N/A"
+        SZ2="N/A"
     fi
 
-    # Formatear tamaño
-    if [[ -n "$F_SIZE" && "$F_SIZE" =~ ^[0-9]+$ ]]; then
-        KB=$((F_SIZE/1024))
-        if [[ $KB -gt 1024 ]]; then
-            MB=$(echo "scale=1; $KB/1024" | bc)
-            SIZE_STR="${MB} MB"
-        else
-            SIZE_STR="${KB} KB"
-        fi
-    else
-        SIZE_STR="N/A"
-    fi
-
-    # Canales en texto
-    case "$F_CH" in
-        1) CH_STR="Mono"   ;;
-        2) CH_STR="Estéreo";;
-        6) CH_STR="5.1"    ;;
-        *) CH_STR="${F_CH}ch" ;;
-    esac
-
-    INFO_TEXT+="  📄 <b>$FNAME</b>\n"
-    INFO_TEXT+="     Códec: <b>${F_CODEC:-N/A}</b>  |  Duración: <b>$DUR_STR</b>  |  Bitrate: <b>$BR_STR</b>\n"
-    INFO_TEXT+="     Sample rate: <b>${F_SR:-N/A} Hz</b>  |  Canales: <b>$CH_STR</b>  |  Tamaño: <b>$SIZE_STR</b>\n\n"
+    INFO_ROWS+=("TRUE" "$BNAME" "${F_COD2:-N/A}" "$DUR2" "$SZ2")
 done
 
-yad --info \
-    --title="🎵 Audio Converter v2 — Paso 2/5: Info de Archivos" \
-    --text="$INFO_TEXT" \
-    --width=640 --height=420 \
+CHECKLIST_OUT=$(yad --list \
+    --title="🎵 Audio Converter — Confirmar Archivos" \
+    --text="<b>Confirma los archivos a convertir:</b>\n<i>Desmarca los que quieras excluir</i>" \
+    --checklist \
+    --column="✔" \
+    --column="Archivo" \
+    --column="Códec" \
+    --column="Duración" \
+    --column="Tamaño" \
+    "${INFO_ROWS[@]}" \
+    --print-column=2 \
+    --separator="|" \
+    --width=720 --height=420 \
     --button="gtk-cancel:1" \
-    --button="Continuar ▶:0" 2>/dev/null
+    --button="Continuar ▶:0" 2>/dev/null)
 
-[[ $? -ne 0 ]] && exit 0
+[[ $? -ne 0 || -z "$CHECKLIST_OUT" ]] && exit 0
+
+# Filtrar INPUT_FILES según los seleccionados — igual que v3
+FINAL_FILES=()
+while IFS= read -r sel_name; do
+    sel_name="${sel_name//|/}"
+    sel_name="${sel_name#\"${sel_name%%[![:space:]]*}\"}"  # trim leading
+    sel_name="${sel_name%\"${sel_name##*[![:space:]]}\"}"  # trim trailing
+    [[ -z "$sel_name" ]] && continue
+    for orig in "${INPUT_FILES[@]}"; do
+        if [[ "$(basename "$orig")" == "$sel_name" ]]; then
+            FINAL_FILES+=("$orig")
+            break
+        fi
+    done
+done <<< "$CHECKLIST_OUT"
+
+if [[ ${#FINAL_FILES[@]} -eq 0 ]]; then
+    yad --info --title="Sin archivos" \
+        --text="No se seleccionó ningún archivo." \
+        --width=360 --button="OK:0" 2>/dev/null
+    exit 0
+fi
+INPUT_FILES=("${FINAL_FILES[@]}")
+FILE_COUNT=${#INPUT_FILES[@]}
 
 # ════════════════════════════════════════════════════════════════
 #  PASO 3 — Seleccionar formato de salida
 # ════════════════════════════════════════════════════════════════
 FORMAT_RAW=$(yad --list \
-    --title="🎵 Audio Converter v2 — Paso 3/5: Formato de Salida" \
+    --title="🎵 Audio Converter — Formato de Salida" \
     --text="<b>Selecciona el formato al que deseas convertir:</b>" \
     --column="Ext" \
     --column="Nombre Completo" \
@@ -152,17 +314,17 @@ case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
 
 if [[ "$IS_LOSSLESS" == "false" ]]; then
     QUALITY_RAW=$(yad --list \
-        --title="🎵 Audio Converter v2 — Paso 4/5: Calidad de Audio" \
-        --text="<b>Selecciona la calidad (bitrate) de salida:</b>\n<i>Mayor bitrate → mejor calidad y mayor tamaño de archivo</i>" \
+        --title="🎵 Audio Converter — Calidad de Audio" \
+        --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
         --column="Bitrate" \
         --column="Calidad" \
         --column="Uso recomendado" \
-        "64k"  "Baja"        "Voz, podcasts, audiolibros" \
-        "96k"  "Media-baja"  "Radio online, streaming básico" \
-        "128k" "Media"       "Música casual, streaming general" \
-        "192k" "Alta"        "Música de buena calidad  ✦" \
-        "256k" "Muy alta"    "Música de alta fidelidad" \
-        "320k" "Máxima"      "Audiófilos, archivos maestros" \
+        "64k"  "Baja"       "Voz, podcasts, audiolibros" \
+        "96k"  "Media-baja" "Radio online, streaming básico" \
+        "128k" "Media"      "Música casual, streaming general" \
+        "192k" "Alta"       "Música de buena calidad  ✦" \
+        "256k" "Muy alta"   "Música de alta fidelidad" \
+        "320k" "Máxima"     "Audiófilos, archivos maestros" \
         --width=540 --height=380 \
         --print-column=1 \
         --button="gtk-cancel:1" \
@@ -176,13 +338,13 @@ fi
 #  PASO 5 — Seleccionar carpeta de destino (recuerda la última)
 # ════════════════════════════════════════════════════════════════
 OUTPUT_DIR=$(yad --file \
-    --title="🎵 Audio Converter v2 — Paso 5/5: Carpeta de Destino" \
-    --text="<b>Selecciona la carpeta donde se guardarán los archivos convertidos:</b>\n<i>Se recuerda la última carpeta usada</i>" \
+    --title="🎵 Audio Converter — Carpeta de Destino" \
+    --text="<b>Selecciona la carpeta donde se guardarán los archivos convertidos:</b>" \
     --directory \
     --filename="$LAST_DIR/" \
     --width=750 --height=520 \
     --button="gtk-cancel:1" \
-    --button="Convertir ✔:0" 2>/dev/null)
+    --button="Confirmar ✔:0" 2>/dev/null)
 
 [[ $? -ne 0 || -z "$OUTPUT_DIR" ]] && exit 0
 
@@ -195,114 +357,52 @@ echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
 CONVERTED=0
 FAILED=0
 CONVERTED_FILES=()
+FILE_NUM=0
 
 for INPUT_FILE in "${INPUT_FILES[@]}"; do
+    ((FILE_NUM++))
 
     BASENAME=$(basename "$INPUT_FILE")
     FILENAME="${BASENAME%.*}"
-    OUTPUT_FILE="$OUTPUT_DIR/$FILENAME.$FORMAT"
+    SAFE_NAME=$(clean_filename "$FILENAME")
+    OUTPUT_FILE="$OUTPUT_DIR/$SAFE_NAME.$FORMAT"
 
-    # Evitar sobreescribir: añadir sufijo numérico si ya existe
+    # Resolver conflicto si el archivo ya existe
     if [[ -f "$OUTPUT_FILE" ]]; then
-        COUNTER=1
-        while [[ -f "$OUTPUT_DIR/${FILENAME}_${COUNTER}.$FORMAT" ]]; do
-            ((COUNTER++))
-        done
-        FILENAME="${FILENAME}_${COUNTER}"
-        OUTPUT_FILE="$OUTPUT_DIR/$FILENAME.$FORMAT"
+        resolve_conflict "$OUTPUT_FILE" "$SAFE_NAME" "$FORMAT" "$OUTPUT_DIR"
+        $SKIP_FILE && { ((FAILED++)); continue; }
     fi
 
-    # Duración para calcular % de progreso
-    RAW_DUR=$(ffprobe -v error \
-        -show_entries format=duration \
-        -of default=noprint_wrappers=1:nokey=1 \
-        "$INPUT_FILE" 2>/dev/null)
-    DUR_INT=${RAW_DUR%.*}
-    [[ -z "$DUR_INT" || ! "$DUR_INT" =~ ^[0-9]+$ || "$DUR_INT" -le 0 ]] && DUR_INT=0
+    convert_file "$INPUT_FILE" "$OUTPUT_FILE" "$FILE_NUM" "$FILE_COUNT"
+    CONV_RESULT=$?
 
-    PIPE=$(mktemp -u /tmp/audioconv_XXXXXX)
-    mkfifo "$PIPE"
-
-    # Lanzar ffmpeg
-    if [[ "$IS_LOSSLESS" == "true" ]]; then
-        ffmpeg -y -i "$INPUT_FILE" -progress "$PIPE" -nostats \
-               "$OUTPUT_FILE" >/dev/null 2>&1 &
-    else
-        ffmpeg -y -i "$INPUT_FILE" -b:a "$BITRATE_OPT" -progress "$PIPE" -nostats \
-               "$OUTPUT_FILE" >/dev/null 2>&1 &
-    fi
-    FFMPEG_PID=$!
-
-    FILE_NUM=$((CONVERTED + FAILED + 1))
-    QUALITY_LABEL="$FORMAT"
-    [[ -n "$BITRATE_OPT" ]] && QUALITY_LABEL="$FORMAT @ $BITRATE_OPT"
-
-    # Subshell que calcula % y lo pasa a yad --progress
-    (
-        PCT=0
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^out_time_ms=([0-9]+)$ ]]; then
-                T="${BASH_REMATCH[1]}"
-                if [[ $DUR_INT -gt 0 ]]; then
-                    PCT=$(( T / (DUR_INT * 10000) ))
-                    [[ $PCT -gt 99 ]] && PCT=99
-                else
-                    PCT=$(( (PCT + 1) % 98 ))
-                fi
-                echo "$PCT"
-            fi
-            [[ "$line" == "progress=end" ]] && echo "100" && break
-        done < "$PIPE"
-    ) | yad --progress \
-        --title="🔄 Convirtiendo ($FILE_NUM / $FILE_COUNT)..." \
-        --text="<b>Archivo $FILE_NUM de $FILE_COUNT</b>\n\n  <b>Archivo:  </b><i>$BASENAME</i>\n  <b>Calidad:  </b>$QUALITY_LABEL\n  <b>Destino:  </b><i>$OUTPUT_DIR</i>" \
-        --percentage=0 \
-        --auto-close \
-        --width=540 \
-        --button="⛔  Cancelar conversión:1" 2>/dev/null
-
-    YAD_EXIT=$?
-    rm -f "$PIPE"
-
-    # ── Cancelación por el usuario ──────────────────────────────
-    if [[ $YAD_EXIT -ne 0 ]]; then
-        kill "$FFMPEG_PID" 2>/dev/null
-        wait "$FFMPEG_PID" 2>/dev/null
-        rm -f "$OUTPUT_FILE"
-        yad --warning \
-            --title="Conversión cancelada" \
-            --text="<b>⚠ Conversión cancelada.</b>\n\nEl archivo parcial fue eliminado:\n<i>$OUTPUT_FILE</i>" \
-            --width=440 --button="OK:0" 2>/dev/null
-        exit 0
-    fi
-
-    wait "$FFMPEG_PID"; FFMPEG_EXIT=$?
-
-    if [[ $FFMPEG_EXIT -eq 0 ]]; then
+    if [[ $CONV_RESULT -eq 0 ]]; then
         ((CONVERTED++))
         CONVERTED_FILES+=("$OUTPUT_FILE")
-        # Guardar en historial
-        echo "$(date '+%Y-%m-%d %H:%M')  |  $BASENAME  →  $FILENAME.$FORMAT  |  $QUALITY_LABEL  |  $OUTPUT_DIR" \
+        QUALITY_LABEL="$FORMAT"
+        [[ -n "$BITRATE_OPT" ]] && QUALITY_LABEL="$FORMAT @ $BITRATE_OPT"
+        echo "$(date '+%Y-%m-%d %H:%M')  |  $BASENAME  →  $(basename "$OUTPUT_FILE")  |  $QUALITY_LABEL  |  $OUTPUT_DIR" \
             >> "$HISTORY_FILE"
     else
         ((FAILED++))
         rm -f "$OUTPUT_FILE"
     fi
 
-done   # fin del bucle de archivos
+done
 
 # ════════════════════════════════════════════════════════════════
 #  DIALOG FINAL — Resumen de completado
 # ════════════════════════════════════════════════════════════════
+QUALITY_LABEL="$FORMAT"
+[[ -n "$BITRATE_OPT" ]] && QUALITY_LABEL="$FORMAT @ $BITRATE_OPT"
+
 DONE_TEXT="<b><span foreground='#4CAF50' size='large'>✅  ¡Proceso completado!</span></b>\n\n"
 DONE_TEXT+="  <b>Convertidos:</b>  $CONVERTED de $FILE_COUNT\n"
 [[ $FAILED -gt 0 ]] && \
-    DONE_TEXT+="  <b><span foreground='#F44336'>Fallidos:</span></b>  $FAILED\n"
-DONE_TEXT+="  <b>Formato:</b>  $FORMAT"
-[[ -n "$BITRATE_OPT" ]] && DONE_TEXT+=" @ $BITRATE_OPT"
-DONE_TEXT+="\n  <b>Ubicación:</b>  $OUTPUT_DIR\n\n"
+    DONE_TEXT+="  <b><span foreground='#F44336'>Omitidos/Fallidos:</span></b>  $FAILED\n"
+DONE_TEXT+="  <b>Formato:</b>  $QUALITY_LABEL\n"
+DONE_TEXT+="  <b>Ubicación:</b>  $OUTPUT_DIR\n\n"
 
-# Listar archivos generados (máx 8 para no saturar el dialog)
 if [[ ${#CONVERTED_FILES[@]} -gt 0 ]]; then
     DONE_TEXT+="<b>Archivos generados:</b>\n"
     LIMIT=$(( ${#CONVERTED_FILES[@]} < 8 ? ${#CONVERTED_FILES[@]} : 8 ))
@@ -318,21 +418,22 @@ fi
 yad --info \
     --title="✅ Conversión completada" \
     --text="$DONE_TEXT" \
-    --width=580 --height=340 \
+    --width=580 --height=360 \
     --button="🕑  Historial:3" \
     --button="📂  Abrir carpeta:2" \
     --button="gtk-ok:0" 2>/dev/null
 
 BTN=$?
 [[ $BTN -eq 2 ]] && xdg-open "$OUTPUT_DIR" &
-[[ $BTN -eq 3 ]] && yad --text-info \
-    --title="🕑 Historial de conversiones" \
-    --filename="$HISTORY_FILE" \
-    --width=760 --height=440 \
-    --tail \
-    --button="🗑  Borrar historial:2" \
-    --button="gtk-ok:0" 2>/dev/null
-# Botón "Borrar historial"
-[[ $? -eq 2 ]] && > "$HISTORY_FILE"
+if [[ $BTN -eq 3 ]]; then
+    yad --text-info \
+        --title="🕑 Historial de conversiones" \
+        --filename="$HISTORY_FILE" \
+        --width=760 --height=440 \
+        --tail \
+        --button="🗑  Borrar historial:2" \
+        --button="gtk-ok:0" 2>/dev/null
+    [[ $? -eq 2 ]] && > "$HISTORY_FILE"
+fi
 
 exit 0
