@@ -691,15 +691,12 @@ if [ "$CANCELLED" != true ] && [ "$DIALOG_CLOSED_BY_US" != true ]; then
 fi
 
 if [ "$CANCELLED" = true ]; then
-    for PART in "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.part \
-                "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.ytdl; do
-        [ -f "$PART" ] && rm -f "$PART"
-    done
-
-    AFTER=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
-    NEWFILE=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -n1)
-    if [ -n "$NEWFILE" ]; then
-        rm -f "$DOWNLOAD_DIR/$NEWFILE"
+    if [ -n "$BASENAME_RESTRICT" ]; then
+        shopt -s nullglob
+        for LEFTOVER in "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*; do
+            rm -f "$LEFTOVER"
+        done
+        shopt -u nullglob
     fi
 
     kdialog --sorry "Descarga cancelada."
