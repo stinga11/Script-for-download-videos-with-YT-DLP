@@ -27,9 +27,9 @@ convert_audio() {
     local OUTPUT="${INPUT%.*}.$TARGET"
 
     if [ "$TARGET" = "mp3" ]; then
-        ffmpeg -y -i "$INPUT" -vn -codec:a libmp3lame -qscale:a 2 "$OUTPUT"
+        ffmpeg -y -threads auto -i "$INPUT" -vn -codec:a libmp3lame -qscale:a 2 "$OUTPUT"
     else
-        ffmpeg -y -i "$INPUT" -vn -codec:a libopus -b:a 128k "$OUTPUT"
+        ffmpeg -y -threads auto -i "$INPUT" -vn -codec:a libopus -b:a 128k "$OUTPUT"
     fi
 
     echo "$OUTPUT"
