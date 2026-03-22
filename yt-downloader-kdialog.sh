@@ -118,7 +118,7 @@ VIDEO_OPTIONS=$(echo "$FORMAT_LIST" | awk '
         }
     }
 
-    # prioridad de codec: av1 > vp9 > avc
+    # prioridad de codec: av1 > vp9 > avc/h264
     if(codec=="av01" || codec=="av1")
         codec_rank=3
     else if(codec=="vp9")
