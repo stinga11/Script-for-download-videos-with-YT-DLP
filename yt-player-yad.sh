@@ -131,6 +131,7 @@ SELECTED=$(yad --list \
     --column="Formato" \
     --separator="" \
     --width=350 --height=400 --center \
+    --no-headers \
     "${YAD_LIST[@]}")
 
 [ $? -ne 0 ] && exit 0
