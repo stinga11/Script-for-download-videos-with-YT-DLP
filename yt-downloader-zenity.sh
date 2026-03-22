@@ -286,40 +286,55 @@ done
     --text="Descargando..." \
     --percentage=0 \
     --cancel-label="Cancelar" \
-    --auto-close
+    --auto-close &
 
-ZENITY_EXIT=$?
+ZENITY_PID=$!
+CANCELLED=false
+
+# Bucle principal
+while kill -0 $YTPID 2>/dev/null; do
+    if ! kill -0 $ZENITY_PID 2>/dev/null; then
+        CANCELLED=true
+        kill -TERM $YTPID 2>/dev/null
+        break
+    fi
+    sleep 0.3
+done
+
+# Race condition fix
+DIALOG_CLOSED_BY_US=false
+
+if [ "$CANCELLED" != true ] && kill -0 $ZENITY_PID 2>/dev/null; then
+    kill $ZENITY_PID 2>/dev/null
+    DIALOG_CLOSED_BY_US=true
+fi
+
+wait $YTPID 2>/dev/null
+wait $ZENITY_PID 2>/dev/null
+
+if [ "$CANCELLED" != true ] && [ "$DIALOG_CLOSED_BY_US" != true ]; then
+    CANCELLED=true
+fi
 
 # ---------------------------------------------------------
 # Cancelación: borrar archivo descargado parcialmente
 # ---------------------------------------------------------
 
-if [ $ZENITY_EXIT -ne 0 ]; then
-    kill -TERM $YTPID 2>/dev/null
-    wait $YTPID 2>/dev/null
+if [ "$CANCELLED" = true ]; then
     rm -f "$TMPLOG"
 
-    # Bug fix: borrar .part por nombre conocido, cubre el caso donde el .part
-    # ya existía en BEFORE por una cancelación previa y comm no lo detecta
     if [ -n "$BASENAME_RESTRICT" ]; then
-        for PART in "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.part \
-                    "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*.ytdl; do
-            [ -f "$PART" ] && rm -f "$PART"
+        shopt -s nullglob
+        for LEFTOVER in "$DOWNLOAD_DIR/$BASENAME_RESTRICT".*; do
+            rm -f "$LEFTOVER"
         done
-    fi
-
-    # También borrar cualquier archivo nuevo completo que comm detecte
-    AFTER_CANCEL=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf "%f\n" | sort)
-    NEWFILE_CANCEL=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER_CANCEL") | head -n1)
-    if [ -n "$NEWFILE_CANCEL" ]; then
-        rm -f "$DOWNLOAD_DIR/$NEWFILE_CANCEL"
+        shopt -u nullglob
     fi
 
     zenity --info --text="Descarga cancelada."
     exit 0
 fi
 
-wait $YTPID
 rm -f "$TMPLOG"
 
 # ---------------------------------------------------------
