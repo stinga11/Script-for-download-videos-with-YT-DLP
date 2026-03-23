@@ -63,7 +63,10 @@ if echo "$URL" | grep -qE "list=" && echo "$URL" | grep -qE "[?&]v="; then
         --column="Opción" \
         "Solo este video" \
         "Toda la playlist")
+
     [ $? -ne 0 ] && exit 0
+    [ -z "$CHOICE" ] && exit 0
+
     if [ "$CHOICE" = "Toda la playlist" ]; then
         IS_PLAYLIST=1
         LIST_ID=$(echo "$URL" | grep -Eo 'list=[A-Za-z0-9_-]+' | head -n1)
@@ -692,6 +695,7 @@ if [ "$QUALITY" = "AUDIO" ]; then
 
     (
         while kill -0 $FFMPEG_PID 2>/dev/null; do
+            echo "# Convirtiendo a $AUDIO_FORMAT..."
             sleep 0.5
         done
     ) | zenity --progress \
