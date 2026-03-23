@@ -389,6 +389,7 @@ if [ "$QUALITY" = "AUDIO" ]; then
     # ffmpeg trabaja; yad --pulsate ignora el texto actualizado.
     (
         while kill -0 $FFMPEG_PID 2>/dev/null; do
+            echo "0"
             echo "# Convirtiendo a $AUDIO_FORMAT..."
             sleep 0.1
         done
