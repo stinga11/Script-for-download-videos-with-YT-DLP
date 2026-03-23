@@ -391,7 +391,7 @@ if [ "$QUALITY" = "AUDIO" ]; then
         while kill -0 $FFMPEG_PID 2>/dev/null; do
             echo "0"
             echo "# Convirtiendo a $AUDIO_FORMAT..."
-            sleep 0.1
+            sleep 0.5
         done
     ) | yad --progress \
         --title="Convirtiendo a $AUDIO_FORMAT..." \
