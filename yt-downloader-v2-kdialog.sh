@@ -76,7 +76,9 @@ if echo "$URL" | grep -qE "list=" && echo "$URL" | grep -qE "[?&]v="; then
         --menu "La URL contiene un video dentro de una playlist.\n¿Qué deseas descargar?" \
         1 "Solo este video" \
         2 "Toda la playlist")
+
     [ $? -ne 0 ] && exit 0
+    [ -z "$CHOICE" ] && exit 0
 
     if [ "$CHOICE" = "2" ]; then
         IS_PLAYLIST=1
