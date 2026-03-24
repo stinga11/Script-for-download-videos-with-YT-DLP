@@ -162,6 +162,7 @@ if [ "$IS_PLAYLIST" = "1" ]; then
         FORMAT="bestaudio"
 
         AUDIO_FORMAT=$(yad --list \
+            --separator="|" \
             --title="Formato de audio" \
             --text="Selecciona el formato final del audio:" \
             --column="Formato" --column="Descripción" \
@@ -518,6 +519,7 @@ fi
 
 if [ "$QUALITY" = "AUDIO" ]; then
     AUDIO_FORMAT=$(yad --list \
+        --separator="|" \
         --title="Formato de audio" \
         --text="Selecciona el formato final del audio:" \
         --column="Formato" --column="Descripción" \
