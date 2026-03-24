@@ -117,8 +117,9 @@ declare -A VIDEO_MAP
 YAD_LIST=()
 
 while IFS="|" read -r ID DESC; do
-    VIDEO_MAP["$DESC"]="$ID"
-    YAD_LIST+=("$DESC")
+    DESC_CLEAN=$(echo "$DESC" | tr '|' '/')
+    YAD_LIST+=("$DESC_CLEAN")
+    VIDEO_MAP["$DESC_CLEAN"]="$ID"
 done <<< "$VIDEO_OPTIONS"
 
 # ---------------------------------------------------------
@@ -136,6 +137,8 @@ SELECTED=$(yad --list \
 
 [ $? -ne 0 ] && exit 0
 [ -z "$SELECTED" ] && exit 0
+
+SELECTED=$(echo "$SELECTED" | cut -d'|' -f1 | sed 's/[[:space:]]*$//')
 
 VIDEO_ID="${VIDEO_MAP[$SELECTED]}"
 
