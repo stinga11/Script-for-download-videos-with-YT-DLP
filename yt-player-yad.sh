@@ -129,7 +129,7 @@ SELECTED=$(yad --list \
     --title="Reproducir: $TITLE" \
     --text="Selecciona la resolución:" \
     --column="Formato" \
-    --separator="" \
+    --separator="|" \
     --width=350 --height=400 --center \
     --no-headers \
     "${YAD_LIST[@]}")
