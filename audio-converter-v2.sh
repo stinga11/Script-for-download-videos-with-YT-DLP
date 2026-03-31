@@ -74,70 +74,239 @@ MODE=$(echo "$MODE" | tr -d '|' | xargs)
 #  FUNCIONES COMPARTIDAS
 # ════════════════════════════════════════════════════════════════
 
-select_format() {
-    FORMAT_RAW=$(yad --list \
-        --title="🎵 Audio Converter — Formato de Salida" \
-        --text="<b>Selecciona el formato al que deseas convertir:</b>" \
-        --column="Ext" \
-        --column="Nombre Completo" \
-        --column="Tipo" \
-        "mp3"  "MPEG Audio Layer III"           "Con pérdida" \
-        "aac"  "Advanced Audio Coding"          "Con pérdida" \
-        "flac" "Free Lossless Audio Codec"      "Sin pérdida ✦" \
-        "ogg"  "Ogg Vorbis"                     "Con pérdida" \
-        "wav"  "Waveform Audio File"            "Sin pérdida ✦" \
-        "opus" "Opus Interactive Audio"         "Con pérdida" \
-        "wma"  "Windows Media Audio"            "Con pérdida" \
-        "m4a"  "MPEG-4 Audio"                   "Con pérdida" \
-        "aiff" "Audio Interchange File Format"  "Sin pérdida ✦" \
-        "mp2"  "MPEG Audio Layer II"            "Con pérdida" \
-        --width=520 --height=450 \
-        --print-column=1 \
-        --button="gtk-cancel:1" \
-        --button="Siguiente ▶:0" 2>/dev/null)
-    [[ $? -ne 0 || -z "$FORMAT_RAW" ]] && return 1
-    FORMAT=$(echo "$FORMAT_RAW" | tr -d '|' | xargs)
-    return 0
-}
-
-select_quality() {
-    IS_LOSSLESS=false
+# ════════════════════════════════════════════════════════════════
+#  FUNCIÓN: Selección de opciones de conversión con navegación
+#  Pasos: Formato → Bitrate → Sample Rate → Bit Depth → Carpeta
+#  Returns: 0=OK  1=Cancelar  2=Atrás desde Formato (para el llamador)
+#  El llamador pasa el STEP inicial:  select_audio_options [STEP_INICIO]
+# ════════════════════════════════════════════════════════════════
+select_audio_options() {
+    local START_STEP="${1:-3}"
+    FORMAT=""
     BITRATE_OPT=""
-    case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
-    if [[ "$IS_LOSSLESS" == "false" ]]; then
-        QUALITY_RAW=$(yad --list \
-            --title="🎵 Audio Converter — Calidad de Audio" \
-            --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
-            --column="Bitrate" \
-            --column="Calidad" \
-            --column="Uso recomendado" \
-            "64k"  "Baja"       "Voz, podcasts, audiolibros" \
-            "96k"  "Media-baja" "Radio online, streaming básico" \
-            "128k" "Media"      "Música casual, streaming general" \
-            "192k" "Alta"       "Música de buena calidad  ✦" \
-            "256k" "Muy alta"   "Música de alta fidelidad" \
-            "320k" "Máxima"     "Audiófilos, archivos maestros" \
-            --width=540 --height=380 \
-            --print-column=1 \
-            --button="gtk-cancel:1" \
-            --button="Siguiente ▶:0" 2>/dev/null)
-        [[ $? -ne 0 || -z "$QUALITY_RAW" ]] && return 1
-        BITRATE_OPT=$(echo "$QUALITY_RAW" | tr -d '|' | xargs)
-    fi
-    return 0
-}
+    IS_LOSSLESS=false
+    SAMPLE_RATE=""
+    BIT_DEPTH=""
+    OUTPUT_DIR=""
 
-select_output_dir() {
-    OUTPUT_DIR=$(yad --file \
-        --title="🎵 Audio Converter — Carpeta de Destino" \
-        --text="<b>Selecciona la carpeta donde se guardarán los archivos:</b>" \
-        --directory \
-        --filename="$LAST_DIR/" \
-        --width=750 --height=520 \
-        --button="gtk-cancel:1" \
-        --button="Confirmar ✔:0" 2>/dev/null)
-    [[ $? -ne 0 || -z "$OUTPUT_DIR" ]] && return 1
-    echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
+    local STEP=$START_STEP
+    while true; do
+        case $STEP in
+
+        # ── Formato ──────────────────────────────────────────────
+        3)
+            FORMAT_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Formato de Salida" \
+                --text="<b>Selecciona el formato al que deseas convertir:</b>" \
+                --column="Ext" \
+                --column="Nombre Completo" \
+                --column="Tipo" \
+                "mp3"  "MPEG Audio Layer III"           "Con pérdida" \
+                "aac"  "Advanced Audio Coding"          "Con pérdida" \
+                "flac" "Free Lossless Audio Codec"      "Sin pérdida ✦" \
+                "ogg"  "Ogg Vorbis"                     "Con pérdida" \
+                "wav"  "Waveform Audio File"            "Sin pérdida ✦" \
+                "opus" "Opus Interactive Audio"         "Con pérdida" \
+                "wma"  "Windows Media Audio"            "Con pérdida" \
+                "m4a"  "MPEG-4 Audio"                   "Con pérdida" \
+                "aiff" "Audio Interchange File Format"  "Sin pérdida ✦" \
+                "mp2"  "MPEG Audio Layer II"            "Con pérdida" \
+                --width=520 --height=450 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 1 ]] && return 1
+            [[ $RC -eq 2 ]] && return 2   # el llamador decide a dónde volver
+            [[ -z "$FORMAT_RAW" ]] && continue
+
+            FORMAT=$(echo "$FORMAT_RAW" | tr -d '|' | xargs)
+            IS_LOSSLESS=false
+            case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
+            BITRATE_OPT=""
+            STEP=4
+            ;;
+
+        # ── Bitrate (solo formatos con pérdida) ──────────────────
+        4)
+            if [[ "$IS_LOSSLESS" == "true" ]]; then
+                STEP=5; continue
+            fi
+
+            QUALITY_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Calidad de Audio" \
+                --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
+                --column="Bitrate" \
+                --column="Calidad" \
+                --column="Uso recomendado" \
+                "64k"  "Baja"       "Voz, podcasts, audiolibros" \
+                "96k"  "Media-baja" "Radio online, streaming básico" \
+                "128k" "Media"      "Música casual, streaming general" \
+                "192k" "Alta"       "Música de buena calidad  ✦" \
+                "256k" "Muy alta"   "Música de alta fidelidad" \
+                "320k" "Máxima"     "Audiófilos, archivos maestros" \
+                --width=540 --height=380 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 1 ]] && return 1
+            [[ $RC -eq 2 ]] && { STEP=3; continue; }
+            [[ -z "$QUALITY_RAW" ]] && continue
+
+            BITRATE_OPT=$(echo "$QUALITY_RAW" | tr -d '|' | xargs)
+            STEP=5
+            ;;
+
+        # ── Sample Rate ───────────────────────────────────────────
+        5)
+            local SR_OPTIONS=()
+            local SR_HINT="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
+
+            case "$FORMAT" in
+                opus)
+                    SR_HINT="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
+                    SR_OPTIONS=(
+                        "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
+                        "24000" "24 kHz"  "Optimizado voz"
+                        "16000" "16 kHz"  "Baja calidad"
+                        "12000" "12 kHz"  "Muy baja"
+                        "8000"  "8 kHz"   "Telefonía"
+                    ) ;;
+                mp3)
+                    SR_HINT="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
+                    SR_OPTIONS=(
+                        "48000" "48 kHz ✦"    "Calidad Máxima"
+                        "44100" "44.1 kHz"    "CD Estándar"
+                        "32000" "32 kHz"      "Radio FM"
+                        "24000" "24 kHz"      "Voz clara"
+                        "22050" "22.05 kHz"   "Calidad media"
+                    ) ;;
+                mp2)
+                    SR_HINT="<b>MP2 solo soporta ciertos valores estándar.</b>"
+                    SR_OPTIONS=(
+                        "48000" "48 kHz"      "Video"
+                        "44100" "44.1 kHz ✦"  "CD"
+                        "32000" "32 kHz"      "Broadcast"
+                        "24000" "24 kHz"      "Baja"
+                    ) ;;
+                aac|m4a)
+                    SR_HINT="<b>AAC soporta hasta 96 kHz (Hi-Res limitado).</b>"
+                    SR_OPTIONS=(
+                        "orig"  "Sin cambios ✦" "Mantener original"
+                        "96000" "96 kHz"        "Hi-Res AAC"
+                        "48000" "48 kHz"        "Video HD"
+                        "44100" "44.1 kHz"      "CD estándar"
+                    ) ;;
+                flac|wav|aiff)
+                    SR_HINT="<b>Formatos sin pérdida: Soportan alta resolución real.</b>"
+                    SR_OPTIONS=(
+                        "orig"   "Sin cambios ✦" "Mantener original"
+                        "192000" "192 kHz"       "Mastering / Audiófilo"
+                        "96000"  "96 kHz"        "Estudio / Hi-Res"
+                        "88200"  "88.2 kHz"      "Multiplo CD"
+                        "48000"  "48 kHz"        "Estándar Pro"
+                        "44100"  "44.1 kHz"      "Estándar CD"
+                    ) ;;
+                *)
+                    SR_OPTIONS=(
+                        "orig"  "Sin cambios ✦" "Mantener original"
+                        "48000" "48 kHz"        "Video / Streaming"
+                        "44100" "44.1 kHz"      "CD estándar"
+                    ) ;;
+            esac
+
+            SR_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Sample Rate" \
+                --text="<b>Selecciona el sample rate para $FORMAT:</b>\n$SR_HINT" \
+                --column="Hz" \
+                --column="Nombre" \
+                --column="Uso típico" \
+                "${SR_OPTIONS[@]}" \
+                --width=540 --height=420 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 1 ]] && return 1
+            if [[ $RC -eq 2 ]]; then
+                [[ "$IS_LOSSLESS" == "true" ]] && STEP=3 || STEP=4
+                continue
+            fi
+            [[ -z "$SR_RAW" ]] && continue
+
+            local SR_VAL
+            SR_VAL=$(echo "$SR_RAW" | tr -d '|' | xargs)
+            SAMPLE_RATE=""
+            [[ "$SR_VAL" != "orig" ]] && SAMPLE_RATE="$SR_VAL"
+            STEP=6
+            ;;
+
+        # ── Bit Depth (solo formatos sin pérdida) ─────────────────
+        6)
+            if [[ "$IS_LOSSLESS" == "false" ]]; then
+                STEP=7; continue
+            fi
+
+            BD_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Bit Depth" \
+                --text="<b>Selecciona la profundidad de bits:</b>\n<i>Solo aplica a formatos sin pérdida (FLAC, WAV, AIFF).</i>" \
+                --column="Formato ffmpeg" \
+                --column="Bit Depth" \
+                --column="Descripción" \
+                "orig" "Sin cambios ✦" "Mantener la profundidad de bits original" \
+                "s16"  "16-bit"        "Estándar CD — compatible con todo" \
+                "s32"  "24-bit (s32)"  "Alta resolución — producción y masterización" \
+                "s64"  "32-bit float"  "Máxima precisión — edición profesional" \
+                --width=540 --height=340 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 1 ]] && return 1
+            [[ $RC -eq 2 ]] && { STEP=5; continue; }
+            [[ -z "$BD_RAW" ]] && continue
+
+            local BD_VAL
+            BD_VAL=$(echo "$BD_RAW" | tr -d '|' | xargs)
+            BIT_DEPTH=""
+            [[ "$BD_VAL" != "orig" ]] && BIT_DEPTH="$BD_VAL"
+            STEP=7
+            ;;
+
+        # ── Carpeta de destino ────────────────────────────────────
+        7)
+            OUTPUT_DIR=$(yad --file \
+                --title="🎵 Audio Converter — Carpeta de Destino" \
+                --text="<b>Selecciona la carpeta donde se guardarán los archivos:</b>" \
+                --directory \
+                --filename="$LAST_DIR/" \
+                --width=750 --height=520 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Confirmar ✔:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 1 ]] && return 1
+            if [[ $RC -eq 2 ]]; then
+                [[ "$IS_LOSSLESS" == "true" ]] && STEP=6 || STEP=5
+                continue
+            fi
+            [[ -z "$OUTPUT_DIR" ]] && continue
+
+            echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
+            break
+            ;;
+        esac
+    done
     return 0
 }
 
@@ -157,17 +326,26 @@ convert_file() {
     local PIPE=$(mktemp -u /tmp/audioconv_PIPE_XXXXXX)
     mkfifo "$PIPE"
 
+    # Flags opcionales: sample rate y bit depth
+    local EXTRA_FLAGS=()
+    [[ -n "$SAMPLE_RATE" ]] && EXTRA_FLAGS+=(-ar "$SAMPLE_RATE")
+    [[ -n "$BIT_DEPTH" && "$IS_LOSSLESS" == "true" ]] && EXTRA_FLAGS+=(-sample_fmt "$BIT_DEPTH")
+
     if [[ "$IS_LOSSLESS" == "true" ]]; then
-        ffmpeg -y -threads auto -i "$INPUT_FILE" -progress "$PIPE" -nostats \
-               "$OUTPUT_FILE" >/dev/null 2>&1 &
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$INPUT_FILE" "${EXTRA_FLAGS[@]}" -progress "$PIPE" -nostats \
+               "$OUTPUT_FILE" &
     else
-        ffmpeg -y -threads auto -i "$INPUT_FILE" -b:a "$BITRATE_OPT" -progress "$PIPE" -nostats \
-               "$OUTPUT_FILE" >/dev/null 2>&1 &
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$INPUT_FILE" -b:a "$BITRATE_OPT" "${EXTRA_FLAGS[@]}" -progress "$PIPE" -nostats \
+               "$OUTPUT_FILE" &
     fi
     FFMPEG_PID=$!
 
     local QLABEL="$FORMAT"
     [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
+    [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE}Hz"
+    [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
     local DIALOG_TEXT="<b>Convirtiendo:</b>  <i>$BASENAME</i>\n  <b>Calidad:</b>  $QLABEL"
     [[ -n "$LABEL_EXTRA" ]] && DIALOG_TEXT+="\n$LABEL_EXTRA"
 
@@ -219,6 +397,8 @@ show_final_dialog() {
 
     local QLABEL="$FORMAT"
     [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
+    [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE}Hz"
+    [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
 
     local DONE_TEXT="<b><span foreground='#4CAF50' size='large'>✅  ¡Proceso completado!</span></b>\n\n"
     DONE_TEXT+="  <b>Convertidos:</b>  $CONVERTED de $TOTAL\n"
@@ -412,9 +592,47 @@ if [[ "$MODE" == *"Archivos locales"* ]]; then
     INPUT_FILES=("${FINAL_FILES[@]}")
     FILE_COUNT=${#INPUT_FILES[@]}
 
-    select_format  || exit 0
-    select_quality || exit 0
-    select_output_dir || exit 0
+    # Selección de opciones con navegación Atrás (◀ en Formato vuelve al checklist)
+    while true; do
+        select_audio_options 3
+        RC=$?
+        [[ $RC -eq 1 ]] && exit 0   # Cancelar
+        [[ $RC -eq 0 ]] && break    # OK
+        # RC=2 → Atrás desde Formato: volver al checklist (re-lanzar desde paso 2)
+        # Reconstruimos INFO_ROWS y relanzamos el checklist
+        SELECTED_FILES_RAW=$(yad --list \
+            --title="🎵 Paso 2 — Confirmar Archivos (${FILE_COUNT} archivos)" \
+            --text="<b>Confirma los archivos a convertir:</b>\n<i>Desmarca los que no quieras incluir</i>" \
+            --checklist \
+            --column="✔" \
+            --column="Nombre" \
+            --column="Códec" \
+            --column="Duración" \
+            --column="Tamaño" \
+            "${INFO_ROWS[@]}" \
+            --print-column=2 \
+            --width=820 --height=460 \
+            --button="gtk-cancel:1" \
+            --button="☑  Todas:2" \
+            --button="Continuar ▶:0" 2>/dev/null)
+        BTN_FILES=$?
+        [[ $BTN_FILES -eq 1 ]] && exit 0
+        if [[ $BTN_FILES -eq 2 ]]; then
+            FINAL_FILES=("${INPUT_FILES[@]}")
+        else
+            FINAL_FILES=()
+            while IFS= read -r sel_name; do
+                sel_name="${sel_name//|/}"
+                sel_name="${sel_name#"${sel_name%%[![:space:]]*}"}"
+                sel_name="${sel_name%"${sel_name##*[![:space:]]}"}"
+                [[ -z "$sel_name" ]] && continue
+                for orig in "${INPUT_FILES[@]}"; do
+                    [[ "$(basename "$orig")" == "$sel_name" ]] && FINAL_FILES+=("$orig") && break
+                done
+            done <<< "$SELECTED_FILES_RAW"
+        fi
+        [[ ${#FINAL_FILES[@]} -gt 0 ]] && INPUT_FILES=("${FINAL_FILES[@]}") && FILE_COUNT=${#INPUT_FILES[@]}
+    done
 
     CONVERTED=0; FAILED=0; CONVERTED_FILES=()
     for INPUT_FILE in "${INPUT_FILES[@]}"; do
@@ -633,31 +851,81 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
     fi
 
     # ── Seleccionar velocidad de ripeado ────────────────────────
-    RIP_SPEED_RAW=$(yad --list \
-        --title="💿 CD de Audio — Velocidad de Ripeado" \
-        --text="<b>Selecciona la velocidad de ripeado:</b>\n<i>Para CDs en buen estado, Rápido es suficiente.\nUsa Paranoid solo si el CD tiene rayaduras.</i>" \
-        --column="Modo" \
-        --column="Velocidad estimada" \
-        --column="Descripción" \
-        "Rápido"    "5-10x más rápido"  "Sin corrección — ideal para CDs limpios  ✦" \
-        "Normal"    "2-3x más rápido"   "Corrección básica de errores" \
-        "Paranoid"  "Tiempo real"       "Máxima corrección — para CDs rayados" \
-        --width=580 --height=280 \
-        --print-column=1 \
-        --button="gtk-cancel:1" \
-        --button="Siguiente ▶:0" 2>/dev/null)
-    [[ $? -ne 0 || -z "$RIP_SPEED_RAW" ]] && exit 0
-    RIP_SPEED=$(echo "$RIP_SPEED_RAW" | tr -d '|' | xargs)
-    case "$RIP_SPEED" in
-        "Rápido")   CDPARA_FLAGS="-Z" ;;
-        "Normal")   CDPARA_FLAGS="-z" ;;
-        "Paranoid") CDPARA_FLAGS=""   ;;
-        *)          CDPARA_FLAGS="-Z" ;;
-    esac
+    WAV_ONLY=false
+    FORMAT="wav"   # default para WAV_ONLY; se sobreescribe si el usuario elige conversión
+    CDPARA_FLAGS="-Z"
 
-    select_format  || exit 0
-    select_quality || exit 0
-    select_output_dir || exit 0
+    _show_speed_dialog() {
+        RIP_SPEED_RAW=$(yad --list \
+            --title="💿 CD de Audio — Modo de Ripeado" \
+            --text="<b>Selecciona cómo deseas ripear el CD:</b>\n<i>«Solo WAV» guarda las pistas tal cual, sin convertir ni modificar.</i>" \
+            --column="Modo" \
+            --column="Velocidad estimada" \
+            --column="Descripción" \
+            "Rápido"    "5-10x más rápido"  "Conversión al formato elegido — CDs limpios  ✦" \
+            "Normal"    "2-3x más rápido"   "Conversión al formato elegido — corrección básica" \
+            "Paranoid"  "Tiempo real"       "Conversión al formato elegido — CDs rayados" \
+            "Solo WAV"  "5-10x más rápido"  "Copia WAV sin convertir — máxima fidelidad original" \
+            --width=620 --height=310 \
+            --print-column=1 \
+            --button="gtk-cancel:1" \
+            --button="Siguiente ▶:0" 2>/dev/null)
+        return $?
+    }
+
+    _apply_speed() {
+        RIP_SPEED=$(echo "$RIP_SPEED_RAW" | tr -d '|' | xargs)
+        case "$RIP_SPEED" in
+            "Rápido")   CDPARA_FLAGS="-Z"; WAV_ONLY=false ;;
+            "Normal")   CDPARA_FLAGS="-z"; WAV_ONLY=false ;;
+            "Paranoid") CDPARA_FLAGS="";   WAV_ONLY=false ;;
+            "Solo WAV") CDPARA_FLAGS="-Z"; WAV_ONLY=true  ;;
+            *)          CDPARA_FLAGS="-Z"; WAV_ONLY=false ;;
+        esac
+    }
+
+    _show_speed_dialog || exit 0
+    [[ -z "$RIP_SPEED_RAW" ]] && exit 0
+    _apply_speed
+
+    # Si WAV_ONLY, solo necesitamos la carpeta de destino (con Atrás a velocidad)
+    # Si no, pasar por select_audio_options completo (con Atrás a velocidad)
+    while true; do
+        if [[ "$WAV_ONLY" == "true" ]]; then
+            OUTPUT_DIR=$(yad --file \
+                --title="💿 CD de Audio — Carpeta de Destino (WAV)" \
+                --text="<b>Selecciona la carpeta donde se guardarán los archivos WAV:</b>\n<i>Se guardará una subcarpeta con el nombre del álbum.</i>" \
+                --directory \
+                --filename="$LAST_DIR/" \
+                --width=750 --height=520 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Confirmar ✔:0" 2>/dev/null)
+            RC=$?
+            [[ $RC -eq 1 ]] && exit 0
+            if [[ $RC -eq 2 ]]; then
+                _show_speed_dialog || exit 0
+                [[ -z "$RIP_SPEED_RAW" ]] && exit 0
+                _apply_speed
+                continue
+            fi
+            [[ -z "$OUTPUT_DIR" ]] && continue
+            echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
+            FORMAT="wav"
+            IS_LOSSLESS=true
+            BITRATE_OPT=""
+            break
+        else
+            select_audio_options 3
+            RC=$?
+            [[ $RC -eq 1 ]] && exit 0
+            [[ $RC -eq 0 ]] && break
+            # RC=2 → Atrás desde Formato: volver a velocidad
+            _show_speed_dialog || exit 0
+            [[ -z "$RIP_SPEED_RAW" ]] && exit 0
+            _apply_speed
+        fi
+    done
 
     SAFE_ALBUM=$(clean_filename "$ALBUM")
     ALBUM_DIR="$OUTPUT_DIR/$SAFE_ALBUM"
@@ -739,12 +1007,18 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
             ((FAILED++)); continue
         fi
 
-        # ── Convertir WAV → formato deseado ─────────────────────
-        convert_file "$WAV_FILE" "$OUTPUT_FILE" \
-            "  <b>Álbum:</b>  $ALBUM  —  Pista $TNUM / $TOTAL_SEL"
-        CONV_RESULT=$?
-        rm -f "$WAV_FILE"
-        [[ $CONV_RESULT -eq 2 ]] && exit 0
+        # ── Convertir WAV → formato deseado (o copiar si WAV_ONLY) ──
+        if [[ "$WAV_ONLY" == "true" ]]; then
+            # Mover WAV directamente al destino sin convertir
+            mv "$WAV_FILE" "$OUTPUT_FILE"
+            CONV_RESULT=$?
+        else
+            convert_file "$WAV_FILE" "$OUTPUT_FILE" \
+                "  <b>Álbum:</b>  $ALBUM  —  Pista $TNUM / $TOTAL_SEL"
+            CONV_RESULT=$?
+            rm -f "$WAV_FILE"
+            [[ $CONV_RESULT -eq 2 ]] && exit 0
+        fi
 
         # ── Incrustar metadata ───────────────────────────────────
         if [[ $CONV_RESULT -eq 0 ]]; then
@@ -764,7 +1038,9 @@ elif [[ "$MODE" == *"CD de audio"* ]]; then
 
             ((CONVERTED++))
             CONVERTED_FILES+=("$OUTPUT_FILE")
-            echo "$(date '+%Y-%m-%d %H:%M')  |  CD: $ALBUM — $TNAME  →  $TRACK_FILENAME.$FORMAT  |  ${BITRATE_OPT:-lossless}  |  $ALBUM_DIR" >> "$HISTORY_FILE"
+            QLABEL="${WAV_ONLY:+WAV sin convertir}"
+            [[ -z "$QLABEL" ]] && QLABEL="${BITRATE_OPT:-lossless}"
+            echo "$(date '+%Y-%m-%d %H:%M')  |  CD: $ALBUM — $TNAME  →  $TRACK_FILENAME.$FORMAT  |  $QLABEL  |  $ALBUM_DIR" >> "$HISTORY_FILE"
         else
             ((FAILED++))
             rm -f "$OUTPUT_FILE"
