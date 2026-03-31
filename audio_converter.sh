@@ -284,184 +284,239 @@ INPUT_FILES=("${FINAL_FILES[@]}")
 FILE_COUNT=${#INPUT_FILES[@]}
 
 # ════════════════════════════════════════════════════════════════
-#  PASO 3 — Seleccionar formato de salida
+#  PASOS 3–5 — Configuración con navegación Atrás/Siguiente
+#  STEP 3: Formato  4: Bitrate  5: Sample rate  6: Bit depth  7: Carpeta destino
+#  Botones: 0=Siguiente  1=Cancelar  2=Atrás
 # ════════════════════════════════════════════════════════════════
-FORMAT_RAW=$(yad --list \
-    --title="🎵 Audio Converter — Formato de Salida" \
-    --text="<b>Selecciona el formato al que deseas convertir:</b>" \
-    --column="Ext" \
-    --column="Nombre Completo" \
-    --column="Tipo" \
-    "mp3"  "MPEG Audio Layer III"           "Con pérdida" \
-    "aac"  "Advanced Audio Coding"          "Con pérdida" \
-    "flac" "Free Lossless Audio Codec"      "Sin pérdida ✦" \
-    "ogg"  "Ogg Vorbis"                     "Con pérdida" \
-    "wav"  "Waveform Audio File"            "Sin pérdida ✦" \
-    "opus" "Opus Interactive Audio"         "Con pérdida" \
-    "wma"  "Windows Media Audio"            "Con pérdida" \
-    "m4a"  "MPEG-4 Audio"                   "Con pérdida" \
-    "aiff" "Audio Interchange File Format"  "Sin pérdida ✦" \
-    "mp2"  "MPEG Audio Layer II"            "Con pérdida" \
-    --width=520 --height=450 \
-    --print-column=1 \
-    --button="gtk-cancel:1" \
-    --button="Siguiente ▶:0" 2>/dev/null)
-
-[[ $? -ne 0 || -z "$FORMAT_RAW" ]] && exit 0
-FORMAT=$(echo "$FORMAT_RAW" | tr -d '|' | xargs)
-
-# ════════════════════════════════════════════════════════════════
-#  PASO 4 — Seleccionar calidad/bitrate (solo formatos con pérdida)
-# ════════════════════════════════════════════════════════════════
+FORMAT=""
 BITRATE_OPT=""
 IS_LOSSLESS=false
-case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
-
-if [[ "$IS_LOSSLESS" == "false" ]]; then
-    QUALITY_RAW=$(yad --list \
-        --title="🎵 Audio Converter — Calidad de Audio" \
-        --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
-        --column="Bitrate" \
-        --column="Calidad" \
-        --column="Uso recomendado" \
-        "64k"  "Baja"       "Voz, podcasts, audiolibros" \
-        "96k"  "Media-baja" "Radio online, streaming básico" \
-        "128k" "Media"      "Música casual, streaming general" \
-        "192k" "Alta"       "Música de buena calidad  ✦" \
-        "256k" "Muy alta"   "Música de alta fidelidad" \
-        "320k" "Máxima"     "Audiófilos, archivos maestros" \
-        --width=540 --height=380 \
-        --print-column=1 \
-        --button="gtk-cancel:1" \
-        --button="Siguiente ▶:0" 2>/dev/null)
-
-    [[ $? -ne 0 || -z "$QUALITY_RAW" ]] && exit 0
-    BITRATE_OPT=$(echo "$QUALITY_RAW" | tr -d '|' | xargs)
-fi
-
-# ════════════════════════════════════════════════════════════════
-#  PASO 4b — Seleccionar sample rate (según el formato)
-# ════════════════════════════════════════════════════════════════
-
-SR_OPTIONS=()
-SR_HINT="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
-
-case "$FORMAT" in
-    opus)
-        SR_HINT="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
-        SR_OPTIONS=(
-            "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
-            "24000" "24 kHz" "Optimizado voz"
-            "16000" "16 kHz" "Baja calidad"
-            "12000" "12 kHz" "Muy baja"
-            "8000"  "8 kHz"  "Telefonía"
-        )
-        ;;
-    mp3)
-        SR_HINT="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
-        SR_OPTIONS=(
-            "48000" "48 kHz ✦" "Calidad Máxima"
-            "44100" "44.1 kHz" "CD Estándar"
-            "32000" "32 kHz" "Radio FM"
-            "24000" "24 kHz" "Voz clara"
-            "22050" "22.05 kHz" "Calidad media"
-        )
-        ;;
-    mp2)
-        SR_HINT="<b>MP2 solo soporta ciertos valores estándar.</b>"
-        SR_OPTIONS=(
-            "48000" "48 kHz" "Video"
-            "44100" "44.1 kHz ✦" "CD"
-            "32000" "32 kHz" "Broadcast"
-            "24000" "24 kHz" "Baja"
-        )
-        ;;
-    aac|m4a)
-        SR_HINT="<b>AAC soporta hasta 96 kHz (Hi-Res limitado).</b>"
-        SR_OPTIONS=(
-            "orig"   "Sin cambios ✦" "Mantener original"
-            "96000"  "96 kHz" "Hi-Res AAC"
-            "48000"  "48 kHz" "Video HD"
-            "44100"  "44.1 kHz" "CD estándar"
-        )
-        ;;
-    flac|wav|aiff)
-        SR_HINT="<b>Formatos sin pérdida: Soportan alta resolución real.</b>"
-        SR_OPTIONS=(
-            "orig"   "Sin cambios ✦" "Mantener original"
-            "192000" "192 kHz" "Mastering / Audiófilo"
-            "96000"  "96 kHz" "Estudio / Hi-Res"
-            "88200"  "88.2 kHz" "Multiplo CD"
-            "48000"  "48 kHz" "Estándar Pro"
-            "44100"  "44.1 kHz" "Estándar CD"
-        )
-        ;;
-    *)
-        SR_OPTIONS=(
-            "orig"   "Sin cambios ✦" "Mantener original"
-            "48000"  "48 kHz" "Video / Streaming"
-            "44100"  "44.1 kHz" "CD estándar"
-        )
-        ;;
-esac
-
-SR_RAW=$(yad --list \
-    --title="🎵 Audio Converter — Sample Rate" \
-    --text="<b>Selecciona el sample rate para $FORMAT:</b>\n$SR_HINT" \
-    --column="Hz" \
-    --column="Nombre" \
-    --column="Uso típico" \
-    "${SR_OPTIONS[@]}" \
-    --width=540 --height=400 \
-    --print-column=1 \
-    --button="gtk-cancel:1" \
-    --button="Siguiente ▶:0" 2>/dev/null)
-
-[[ $? -ne 0 || -z "$SR_RAW" ]] && exit 0
-SR_VAL=$(echo "$SR_RAW" | tr -d '|' | xargs)
-[[ "$SR_VAL" != "orig" ]] && SAMPLE_RATE="$SR_VAL"
-
-# ════════════════════════════════════════════════════════════════
-#  PASO 4c — Seleccionar bit depth (solo formatos sin pérdida)
-# ════════════════════════════════════════════════════════════════
+SAMPLE_RATE=""
 BIT_DEPTH=""
-if [[ "$IS_LOSSLESS" == "true" ]]; then
-    BD_RAW=$(yad --list \
-        --title="🎵 Audio Converter — Bit Depth" \
-        --text="<b>Selecciona la profundidad de bits:</b>\n<i>Solo aplica a formatos sin pérdida (FLAC, WAV, AIFF).</i>" \
-        --column="Formato ffmpeg" \
-        --column="Bit Depth" \
-        --column="Descripción" \
-        "orig" "Sin cambios ✦"  "Mantener la profundidad de bits original" \
-        "s16"  "16-bit"         "Estándar CD — compatible con todo" \
-        "s32"  "24-bit (s32)"   "Alta resolución — producción y masterización" \
-        "s64"  "32-bit float"   "Máxima precisión — edición profesional" \
-        --width=540 --height=340 \
-        --print-column=1 \
-        --button="gtk-cancel:1" \
-        --button="Siguiente ▶:0" 2>/dev/null)
+OUTPUT_DIR=""
 
-    [[ $? -ne 0 || -z "$BD_RAW" ]] && exit 0
-    BD_VAL=$(echo "$BD_RAW" | tr -d '|' | xargs)
-    [[ "$BD_VAL" != "orig" ]] && BIT_DEPTH="$BD_VAL"
-fi
+STEP=3
+while true; do
+    case $STEP in
 
-# ════════════════════════════════════════════════════════════════
-#  PASO 5 — Seleccionar carpeta de destino (recuerda la última)
-# ════════════════════════════════════════════════════════════════
-OUTPUT_DIR=$(yad --file \
-    --title="🎵 Audio Converter — Carpeta de Destino" \
-    --text="<b>Selecciona la carpeta donde se guardarán los archivos convertidos:</b>" \
-    --directory \
-    --filename="$LAST_DIR/" \
-    --width=750 --height=520 \
-    --button="gtk-cancel:1" \
-    --button="Confirmar ✔:0" 2>/dev/null)
+    # ── Paso 3: Formato ──────────────────────────────────────────
+    3)
+        FORMAT_RAW=$(yad --list \
+            --title="🎵 Audio Converter — Paso 3: Formato de Salida" \
+            --text="<b>Selecciona el formato al que deseas convertir:</b>" \
+            --column="Ext" \
+            --column="Nombre Completo" \
+            --column="Tipo" \
+            "mp3"  "MPEG Audio Layer III"           "Con pérdida" \
+            "aac"  "Advanced Audio Coding"          "Con pérdida" \
+            "flac" "Free Lossless Audio Codec"      "Sin pérdida ✦" \
+            "ogg"  "Ogg Vorbis"                     "Con pérdida" \
+            "wav"  "Waveform Audio File"            "Sin pérdida ✦" \
+            "opus" "Opus Interactive Audio"         "Con pérdida" \
+            "wma"  "Windows Media Audio"            "Con pérdida" \
+            "m4a"  "MPEG-4 Audio"                   "Con pérdida" \
+            "aiff" "Audio Interchange File Format"  "Sin pérdida ✦" \
+            "mp2"  "MPEG Audio Layer II"            "Con pérdida" \
+            --width=520 --height=450 \
+            --print-column=1 \
+            --button="gtk-cancel:1" \
+            --button="Siguiente ▶:0" 2>/dev/null)
 
-[[ $? -ne 0 || -z "$OUTPUT_DIR" ]] && exit 0
+        RC=$?
+        [[ $RC -eq 1 || -z "$FORMAT_RAW" ]] && exit 0
 
-# Guardar carpeta en configuración para la próxima vez
-echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
+        FORMAT=$(echo "$FORMAT_RAW" | tr -d '|' | xargs)
+        IS_LOSSLESS=false
+        case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
+        BITRATE_OPT=""
+        STEP=4
+        ;;
+
+    # ── Paso 4: Bitrate (solo formatos con pérdida) ──────────────
+    4)
+        if [[ "$IS_LOSSLESS" == "true" ]]; then
+            STEP=5; continue
+        fi
+
+        QUALITY_RAW=$(yad --list \
+            --title="🎵 Audio Converter — Paso 4: Calidad de Audio" \
+            --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
+            --column="Bitrate" \
+            --column="Calidad" \
+            --column="Uso recomendado" \
+            "64k"  "Baja"       "Voz, podcasts, audiolibros" \
+            "96k"  "Media-baja" "Radio online, streaming básico" \
+            "128k" "Media"      "Música casual, streaming general" \
+            "192k" "Alta"       "Música de buena calidad  ✦" \
+            "256k" "Muy alta"   "Música de alta fidelidad" \
+            "320k" "Máxima"     "Audiófilos, archivos maestros" \
+            --width=540 --height=380 \
+            --print-column=1 \
+            --button="gtk-cancel:1" \
+            --button="◀ Atrás:2" \
+            --button="Siguiente ▶:0" 2>/dev/null)
+
+        RC=$?
+        [[ $RC -eq 1 ]] && exit 0
+        [[ $RC -eq 2 ]] && { STEP=3; continue; }
+        [[ -z "$QUALITY_RAW" ]] && continue
+
+        BITRATE_OPT=$(echo "$QUALITY_RAW" | tr -d '|' | xargs)
+        STEP=5
+        ;;
+
+    # ── Paso 5: Sample rate ──────────────────────────────────────
+    5)
+        SR_OPTIONS=()
+        SR_HINT="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
+
+        case "$FORMAT" in
+            opus)
+                SR_HINT="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
+                SR_OPTIONS=(
+                    "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
+                    "24000" "24 kHz" "Optimizado voz"
+                    "16000" "16 kHz" "Baja calidad"
+                    "12000" "12 kHz" "Muy baja"
+                    "8000"  "8 kHz"  "Telefonía"
+                )
+                ;;
+            mp3)
+                SR_HINT="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
+                SR_OPTIONS=(
+                    "48000" "48 kHz ✦" "Calidad Máxima"
+                    "44100" "44.1 kHz" "CD Estándar"
+                    "32000" "32 kHz" "Radio FM"
+                    "24000" "24 kHz" "Voz clara"
+                    "22050" "22.05 kHz" "Calidad media"
+                )
+                ;;
+            mp2)
+                SR_HINT="<b>MP2 solo soporta ciertos valores estándar.</b>"
+                SR_OPTIONS=(
+                    "48000" "48 kHz" "Video"
+                    "44100" "44.1 kHz ✦" "CD"
+                    "32000" "32 kHz" "Broadcast"
+                    "24000" "24 kHz" "Baja"
+                )
+                ;;
+            aac|m4a)
+                SR_HINT="<b>AAC soporta hasta 96 kHz (Hi-Res limitado).</b>"
+                SR_OPTIONS=(
+                    "orig"   "Sin cambios ✦" "Mantener original"
+                    "96000"  "96 kHz" "Hi-Res AAC"
+                    "48000"  "48 kHz" "Video HD"
+                    "44100"  "44.1 kHz" "CD estándar"
+                )
+                ;;
+            flac|wav|aiff)
+                SR_HINT="<b>Formatos sin pérdida: Soportan alta resolución real.</b>"
+                SR_OPTIONS=(
+                    "orig"   "Sin cambios ✦" "Mantener original"
+                    "192000" "192 kHz" "Mastering / Audiófilo"
+                    "96000"  "96 kHz" "Estudio / Hi-Res"
+                    "88200"  "88.2 kHz" "Multiplo CD"
+                    "48000"  "48 kHz" "Estándar Pro"
+                    "44100"  "44.1 kHz" "Estándar CD"
+                )
+                ;;
+            *)
+                SR_OPTIONS=(
+                    "orig"   "Sin cambios ✦" "Mantener original"
+                    "48000"  "48 kHz" "Video / Streaming"
+                    "44100"  "44.1 kHz" "CD estándar"
+                )
+                ;;
+        esac
+
+        SR_RAW=$(yad --list \
+            --title="🎵 Audio Converter — Paso 5: Sample Rate" \
+            --text="<b>Selecciona el sample rate para $FORMAT:</b>\n$SR_HINT" \
+            --column="Hz" \
+            --column="Nombre" \
+            --column="Uso típico" \
+            "${SR_OPTIONS[@]}" \
+            --width=540 --height=400 \
+            --print-column=1 \
+            --button="gtk-cancel:1" \
+            --button="◀ Atrás:2" \
+            --button="Siguiente ▶:0" 2>/dev/null)
+
+        RC=$?
+        [[ $RC -eq 1 ]] && exit 0
+        if [[ $RC -eq 2 ]]; then
+            # Atrás: lossless salta bitrate, lossy vuelve a bitrate
+            [[ "$IS_LOSSLESS" == "true" ]] && STEP=3 || STEP=4
+            continue
+        fi
+        [[ -z "$SR_RAW" ]] && continue
+
+        SR_VAL=$(echo "$SR_RAW" | tr -d '|' | xargs)
+        SAMPLE_RATE=""
+        [[ "$SR_VAL" != "orig" ]] && SAMPLE_RATE="$SR_VAL"
+        STEP=6
+        ;;
+
+    # ── Paso 6: Bit depth (solo formatos sin pérdida) ────────────
+    6)
+        if [[ "$IS_LOSSLESS" == "false" ]]; then
+            STEP=7; continue
+        fi
+
+        BD_RAW=$(yad --list \
+            --title="🎵 Audio Converter — Paso 6: Bit Depth" \
+            --text="<b>Selecciona la profundidad de bits:</b>\n<i>Solo aplica a formatos sin pérdida (FLAC, WAV, AIFF).</i>" \
+            --column="Formato ffmpeg" \
+            --column="Bit Depth" \
+            --column="Descripción" \
+            "orig" "Sin cambios ✦"  "Mantener la profundidad de bits original" \
+            "s16"  "16-bit"         "Estándar CD — compatible con todo" \
+            "s32"  "24-bit (s32)"   "Alta resolución — producción y masterización" \
+            "s64"  "32-bit float"   "Máxima precisión — edición profesional" \
+            --width=540 --height=340 \
+            --print-column=1 \
+            --button="gtk-cancel:1" \
+            --button="◀ Atrás:2" \
+            --button="Siguiente ▶:0" 2>/dev/null)
+
+        RC=$?
+        [[ $RC -eq 1 ]] && exit 0
+        [[ $RC -eq 2 ]] && { STEP=5; continue; }
+        [[ -z "$BD_RAW" ]] && continue
+
+        BD_VAL=$(echo "$BD_RAW" | tr -d '|' | xargs)
+        BIT_DEPTH=""
+        [[ "$BD_VAL" != "orig" ]] && BIT_DEPTH="$BD_VAL"
+        STEP=7
+        ;;
+
+    # ── Paso 7: Carpeta de destino ───────────────────────────────
+    7)
+        OUTPUT_DIR=$(yad --file \
+            --title="🎵 Audio Converter — Paso 7: Carpeta de Destino" \
+            --text="<b>Selecciona la carpeta donde se guardarán los archivos convertidos:</b>" \
+            --directory \
+            --filename="$LAST_DIR/" \
+            --width=750 --height=520 \
+            --button="gtk-cancel:1" \
+            --button="◀ Atrás:2" \
+            --button="Confirmar ✔:0" 2>/dev/null)
+
+        RC=$?
+        [[ $RC -eq 1 ]] && exit 0
+        if [[ $RC -eq 2 ]]; then
+            # Atrás: lossless vuelve a bit depth, lossy vuelve a sample rate
+            [[ "$IS_LOSSLESS" == "true" ]] && STEP=6 || STEP=5
+            continue
+        fi
+        [[ -z "$OUTPUT_DIR" ]] && continue
+
+        # Guardar carpeta para la próxima vez
+        echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
+        break
+        ;;
+    esac
+done
 
 # ════════════════════════════════════════════════════════════════
 #  CONVERSIÓN — Procesar cada archivo
