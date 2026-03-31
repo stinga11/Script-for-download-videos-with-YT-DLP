@@ -118,13 +118,18 @@ convert_file() {
     local QUALITY_LABEL="$FORMAT"
     [[ -n "$BITRATE_OPT" ]] && QUALITY_LABEL="$FORMAT @ $BITRATE_OPT"
 
+    # Construir flags opcionales
+    local EXTRA_FLAGS=()
+    [[ -n "$SAMPLE_RATE" ]] && EXTRA_FLAGS+=(-ar "$SAMPLE_RATE")
+    [[ -n "$BIT_DEPTH" && "$IS_LOSSLESS" == "true" ]] && EXTRA_FLAGS+=(-sample_fmt "$BIT_DEPTH")
+
     if [[ "$IS_LOSSLESS" == "true" ]]; then
         ffmpeg -hide_banner -loglevel error -y -threads auto \
-               -i "$INPUT_FILE" -progress "$PIPE" -nostats \
+               -i "$INPUT_FILE" "${EXTRA_FLAGS[@]}" -progress "$PIPE" -nostats \
                "$OUTPUT_FILE" &
     else
         ffmpeg -hide_banner -loglevel error -y -threads auto \
-               -i "$INPUT_FILE" -b:a "$BITRATE_OPT" -progress "$PIPE" -nostats \
+               -i "$INPUT_FILE" -b:a "$BITRATE_OPT" "${EXTRA_FLAGS[@]}" -progress "$PIPE" -nostats \
                "$OUTPUT_FILE" &
     fi
     local FFMPEG_PID=$!
@@ -335,6 +340,113 @@ if [[ "$IS_LOSSLESS" == "false" ]]; then
 fi
 
 # ════════════════════════════════════════════════════════════════
+#  PASO 4b — Seleccionar sample rate (según el formato)
+# ════════════════════════════════════════════════════════════════
+
+SR_OPTIONS=()
+SR_HINT="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
+
+case "$FORMAT" in
+    opus)
+        SR_HINT="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
+        SR_OPTIONS=(
+            "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
+            "24000" "24 kHz" "Optimizado voz"
+            "16000" "16 kHz" "Baja calidad"
+            "12000" "12 kHz" "Muy baja"
+            "8000"  "8 kHz"  "Telefonía"
+        )
+        ;;
+    mp3)
+        SR_HINT="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
+        SR_OPTIONS=(
+            "48000" "48 kHz ✦" "Calidad Máxima"
+            "44100" "44.1 kHz" "CD Estándar"
+            "32000" "32 kHz" "Radio FM"
+            "24000" "24 kHz" "Voz clara"
+            "22050" "22.05 kHz" "Calidad media"
+        )
+        ;;
+    mp2)
+        SR_HINT="<b>MP2 solo soporta ciertos valores estándar.</b>"
+        SR_OPTIONS=(
+            "48000" "48 kHz" "Video"
+            "44100" "44.1 kHz ✦" "CD"
+            "32000" "32 kHz" "Broadcast"
+            "24000" "24 kHz" "Baja"
+        )
+        ;;
+    aac|m4a)
+        SR_HINT="<b>AAC soporta hasta 96 kHz (Hi-Res limitado).</b>"
+        SR_OPTIONS=(
+            "orig"   "Sin cambios ✦" "Mantener original"
+            "96000"  "96 kHz" "Hi-Res AAC"
+            "48000"  "48 kHz" "Video HD"
+            "44100"  "44.1 kHz" "CD estándar"
+        )
+        ;;
+    flac|wav|aiff)
+        SR_HINT="<b>Formatos sin pérdida: Soportan alta resolución real.</b>"
+        SR_OPTIONS=(
+            "orig"   "Sin cambios ✦" "Mantener original"
+            "192000" "192 kHz" "Mastering / Audiófilo"
+            "96000"  "96 kHz" "Estudio / Hi-Res"
+            "88200"  "88.2 kHz" "Multiplo CD"
+            "48000"  "48 kHz" "Estándar Pro"
+            "44100"  "44.1 kHz" "Estándar CD"
+        )
+        ;;
+    *)
+        SR_OPTIONS=(
+            "orig"   "Sin cambios ✦" "Mantener original"
+            "48000"  "48 kHz" "Video / Streaming"
+            "44100"  "44.1 kHz" "CD estándar"
+        )
+        ;;
+esac
+
+SR_RAW=$(yad --list \
+    --title="🎵 Audio Converter — Sample Rate" \
+    --text="<b>Selecciona el sample rate para $FORMAT:</b>\n$SR_HINT" \
+    --column="Hz" \
+    --column="Nombre" \
+    --column="Uso típico" \
+    "${SR_OPTIONS[@]}" \
+    --width=540 --height=400 \
+    --print-column=1 \
+    --button="gtk-cancel:1" \
+    --button="Siguiente ▶:0" 2>/dev/null)
+
+[[ $? -ne 0 || -z "$SR_RAW" ]] && exit 0
+SR_VAL=$(echo "$SR_RAW" | tr -d '|' | xargs)
+[[ "$SR_VAL" != "orig" ]] && SAMPLE_RATE="$SR_VAL"
+
+# ════════════════════════════════════════════════════════════════
+#  PASO 4c — Seleccionar bit depth (solo formatos sin pérdida)
+# ════════════════════════════════════════════════════════════════
+BIT_DEPTH=""
+if [[ "$IS_LOSSLESS" == "true" ]]; then
+    BD_RAW=$(yad --list \
+        --title="🎵 Audio Converter — Bit Depth" \
+        --text="<b>Selecciona la profundidad de bits:</b>\n<i>Solo aplica a formatos sin pérdida (FLAC, WAV, AIFF).</i>" \
+        --column="Formato ffmpeg" \
+        --column="Bit Depth" \
+        --column="Descripción" \
+        "orig" "Sin cambios ✦"  "Mantener la profundidad de bits original" \
+        "s16"  "16-bit"         "Estándar CD — compatible con todo" \
+        "s32"  "24-bit (s32)"   "Alta resolución — producción y masterización" \
+        "s64"  "32-bit float"   "Máxima precisión — edición profesional" \
+        --width=540 --height=340 \
+        --print-column=1 \
+        --button="gtk-cancel:1" \
+        --button="Siguiente ▶:0" 2>/dev/null)
+
+    [[ $? -ne 0 || -z "$BD_RAW" ]] && exit 0
+    BD_VAL=$(echo "$BD_RAW" | tr -d '|' | xargs)
+    [[ "$BD_VAL" != "orig" ]] && BIT_DEPTH="$BD_VAL"
+fi
+
+# ════════════════════════════════════════════════════════════════
 #  PASO 5 — Seleccionar carpeta de destino (recuerda la última)
 # ════════════════════════════════════════════════════════════════
 OUTPUT_DIR=$(yad --file \
@@ -395,6 +507,8 @@ done
 # ════════════════════════════════════════════════════════════════
 QUALITY_LABEL="$FORMAT"
 [[ -n "$BITRATE_OPT" ]] && QUALITY_LABEL="$FORMAT @ $BITRATE_OPT"
+[[ -n "$SAMPLE_RATE" ]] && QUALITY_LABEL+="  ${SAMPLE_RATE}Hz"
+[[ -n "$BIT_DEPTH"   ]] && QUALITY_LABEL+="  ${BIT_DEPTH}"
 
 DONE_TEXT="<b><span foreground='#4CAF50' size='large'>✅  ¡Proceso completado!</span></b>\n\n"
 DONE_TEXT+="  <b>Convertidos:</b>  $CONVERTED de $FILE_COUNT\n"
