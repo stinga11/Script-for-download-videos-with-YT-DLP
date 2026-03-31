@@ -25,7 +25,7 @@ trap cleanup EXIT HUP INT TERM
 #  VERIFICACIÓN DE DEPENDENCIAS
 # ════════════════════════════════════════════════════════════════
 MISSING_DEPS=()
-for dep in yad ffmpeg ffprobe curl iconv; do
+for dep in yad ffmpeg ffprobe curl iconv numfmt; do
     command -v "$dep" &>/dev/null || MISSING_DEPS+=("$dep")
 done
 # cd-discid y cdparanoia solo son necesarios para el modo CD
@@ -43,7 +43,8 @@ if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
     done
     MSG+="
 <i>Instálalas antes de continuar.</i>"
-    yad --error --title="Dependencias faltantes" --text="$MSG"         --width=420 --button="OK:0" 2>/dev/null
+    yad --error --title="Dependencias faltantes" --text="$MSG" \
+        --width=420 --button="OK:0" 2>/dev/null
     exit 1
 fi
 
@@ -315,15 +316,15 @@ convert_file() {
     local OUTPUT_FILE="$2"
     local LABEL_EXTRA="${3:-}"
 
-    local BASENAME=$(basename "$INPUT_FILE")
-    local RAW_DUR=$(ffprobe -v error \
+    local BASENAME; BASENAME=$(basename "$INPUT_FILE")
+    local RAW_DUR; RAW_DUR=$(ffprobe -v error \
         -show_entries format=duration \
         -of default=noprint_wrappers=1:nokey=1 \
         "$INPUT_FILE" 2>/dev/null)
     local DUR_INT=${RAW_DUR%.*}
     [[ -z "$DUR_INT" || ! "$DUR_INT" =~ ^[0-9]+$ || "$DUR_INT" -le 0 ]] && DUR_INT=0
 
-    local PIPE=$(mktemp -u /tmp/audioconv_PIPE_XXXXXX)
+    local PIPE; PIPE=$(mktemp -u /tmp/audioconv_PIPE_XXXXXX)
     mkfifo "$PIPE"
 
     # Flags opcionales: sample rate y bit depth
@@ -340,12 +341,17 @@ convert_file() {
                -i "$INPUT_FILE" -b:a "$BITRATE_OPT" "${EXTRA_FLAGS[@]}" -progress "$PIPE" -nostats \
                "$OUTPUT_FILE" &
     fi
-    FFMPEG_PID=$!
+    local FFMPEG_PID; FFMPEG_PID=$!
 
-    local QLABEL="$FORMAT"
-    [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
-    [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE}Hz"
-    [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
+    local QLABEL
+    if [[ "${WAV_ONLY:-false}" == "true" ]]; then
+        QLABEL="WAV sin convertir"
+    else
+        QLABEL="$FORMAT"
+        [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
+        [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE}Hz"
+        [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
+    fi
     local DIALOG_TEXT="<b>Convirtiendo:</b>  <i>$BASENAME</i>\n  <b>Calidad:</b>  $QLABEL"
     [[ -n "$LABEL_EXTRA" ]] && DIALOG_TEXT+="\n$LABEL_EXTRA"
 
@@ -395,10 +401,15 @@ show_final_dialog() {
     shift 3
     local FILES=("$@")
 
-    local QLABEL="$FORMAT"
-    [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
-    [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE}Hz"
-    [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
+    local QLABEL
+    if [[ "${WAV_ONLY:-false}" == "true" ]]; then
+        QLABEL="WAV sin convertir"
+    else
+        QLABEL="$FORMAT"
+        [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
+        [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE}Hz"
+        [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
+    fi
 
     local DONE_TEXT="<b><span foreground='#4CAF50' size='large'>✅  ¡Proceso completado!</span></b>\n\n"
     DONE_TEXT+="  <b>Convertidos:</b>  $CONVERTED de $TOTAL\n"
@@ -409,10 +420,10 @@ show_final_dialog() {
 
     if [[ ${#FILES[@]} -gt 0 ]]; then
         DONE_TEXT+="<b>Archivos generados:</b>\n"
-        local LIMIT=$(( ${#FILES[@]} < 8 ? ${#FILES[@]} : 8 ))
+        local LIMIT=$(( ${#FILES[@]} < 8 ? ${#FILES[@]} : 8 ))  # arithmetic — exit code always 0, safe
         for (( i=0; i<LIMIT; i++ )); do
             local CF="${FILES[$i]}"
-            local FSIZE=$(du -sh "$CF" 2>/dev/null | cut -f1)
+            local FSIZE; FSIZE=$(du -sh "$CF" 2>/dev/null | cut -f1)
             DONE_TEXT+="  📄 $(basename "$CF")  <i>($FSIZE)</i>\n"
         done
         [[ ${#FILES[@]} -gt 8 ]] && \
@@ -530,7 +541,10 @@ if [[ "$MODE" == *"Archivos locales"* ]]; then
     INFO_ROWS=()
     for f in "${INPUT_FILES[@]}"; do
         BNAME=$(basename "$f")
-        RAW2=$(ffprobe -v error             -show_entries format=duration,size             -show_entries stream=codec_name             -of default=noprint_wrappers=1 "$f" 2>/dev/null)
+        RAW2=$(ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_name \
+            -of default=noprint_wrappers=1 "$f" 2>/dev/null)
         F_DUR2=$(echo "$RAW2" | grep "^duration=" | head -1 | cut -d= -f2)
         F_SIZE2=$(echo "$RAW2" | grep "^size="    | head -1 | cut -d= -f2)
         F_COD2=$(echo "$RAW2"  | grep "^codec_name=" | head -1 | cut -d= -f2)
@@ -638,7 +652,7 @@ if [[ "$MODE" == *"Archivos locales"* ]]; then
     for INPUT_FILE in "${INPUT_FILES[@]}"; do
         BASENAME=$(basename "$INPUT_FILE")
         FNAME="${BASENAME%.*}"
-        OUTPUT_FILE="$OUTPUT_DIR/$FNAME.$FORMAT"
+        OUTPUT_FILE="$OUTPUT_DIR/$(clean_filename "$FNAME").$FORMAT"
         if [[ -f "$OUTPUT_FILE" ]]; then
             resolve_conflict "$OUTPUT_FILE" "$FNAME" "$FORMAT" "$OUTPUT_DIR"
             [[ "$SKIP_FILE" == "true" ]] && continue
@@ -648,7 +662,10 @@ if [[ "$MODE" == *"Archivos locales"* ]]; then
         [[ $CONV_RESULT -eq 2 ]] && exit 0
         if [[ $CONV_RESULT -eq 0 ]]; then
             ((CONVERTED++)); CONVERTED_FILES+=("$OUTPUT_FILE")
-            echo "$(date '+%Y-%m-%d %H:%M')  |  $BASENAME  →  $(basename "$OUTPUT_FILE")  |  ${BITRATE_OPT:-lossless}  |  $OUTPUT_DIR" >> "$HISTORY_FILE"
+            _HIST_LABEL="${BITRATE_OPT:-lossless}"
+            [[ -n "$SAMPLE_RATE" ]] && _HIST_LABEL+=" ${SAMPLE_RATE}Hz"
+            [[ -n "$BIT_DEPTH"   ]] && _HIST_LABEL+=" ${BIT_DEPTH}"
+            echo "$(date '+%Y-%m-%d %H:%M')  |  $BASENAME  →  $(basename "$OUTPUT_FILE")  |  $_HIST_LABEL  |  $OUTPUT_DIR" >> "$HISTORY_FILE"
         else
             ((FAILED++)); rm -f "$OUTPUT_FILE"
         fi
