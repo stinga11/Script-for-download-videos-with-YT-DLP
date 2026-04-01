@@ -94,6 +94,8 @@ clean_filename() {
 
 ################################################################################
 # FUNCIÓN: Resolver conflictos de nombre de archivo duplicado
+# Retorna: 0=Reemplazar, 1=Renombrar, 2=Omitir/Cancel
+# Establece variable global CONFLICT_OUTPUT con la ruta
 ################################################################################
 resolve_conflict() {
     local existing_file="$1"
@@ -125,12 +127,20 @@ resolve_conflict() {
         --height=260 \
         --button="Confirmar:0" 2>/dev/null)
     
+    local dialog_result=$?
+    
+    # Si se presionó Cancel (X o Esc), considerar como "Omitir"
+    if (( dialog_result != 0 )); then
+        CONFLICT_OUTPUT=""
+        return 2
+    fi
+    
     # Limpiar salida
     action=$(echo "$action" | tr -d '|' | xargs)
     
     case "$action" in
         Reemplazar)
-            echo "$existing_file"
+            CONFLICT_OUTPUT="$existing_file"
             return 0
             ;;
         Renombrar)
@@ -138,12 +148,13 @@ resolve_conflict() {
             while [[ -f "$output_dir/${filename}_${counter}.$format" ]]; do
                 ((counter++))
             done
-            echo "$output_dir/${filename}_${counter}.$format"
-            return 0
+            CONFLICT_OUTPUT="$output_dir/${filename}_${counter}.$format"
+            return 1
             ;;
         *)
-            # Omitir
-            return 1
+            # Omitir o valor vacío
+            CONFLICT_OUTPUT=""
+            return 2
             ;;
     esac
 }
@@ -192,12 +203,12 @@ convert_file() {
     # Ejecutar ffmpeg con barra de progreso
     if [[ "$IS_LOSSLESS" == "true" ]]; then
         ffmpeg -hide_banner -loglevel error -y -threads auto \
-            -i "$input_file" "${extra_flags[@]}" \
+            -i "$input_file" -vn "${extra_flags[@]}" \
             -progress "$pipe_file" -nostats \
             "$output_file" &>/dev/null &
     else
         ffmpeg -hide_banner -loglevel error -y -threads auto \
-            -i "$input_file" -b:a "$BITRATE_OPT" "${extra_flags[@]}" \
+            -i "$input_file" -vn -b:a "$BITRATE_OPT" "${extra_flags[@]}" \
             -progress "$pipe_file" -nostats \
             "$output_file" &>/dev/null &
     fi
@@ -621,7 +632,7 @@ select_audio_options() {
             
             case $? in
                 1) return 1 ;;
-                2) step=3; continue ;;
+                2) return 2 ;;
             esac
             
             [[ -z "$BITRATE_OPT" ]] && continue
@@ -640,62 +651,48 @@ select_audio_options() {
             
             case "$FORMAT" in
                 opus)
-                    sr_hint="<b>Opus resampled automáticamente máx 48 kHz.</b>"
+                    sr_hint="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
                     sr_options=(
                         "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
-                        "24000" "24 kHz" "Optimizado voz"
-                        "16000" "16 kHz" "Baja calidad"
-                        "12000" "12 kHz" "Muy baja"
-                        "8000"  "8 kHz"  "Telefonía"
-                    )
-                    ;;
+                        "44100" "44.1 kHz"    "Estándar CD"
+                    ) ;;
                 mp3)
-                    sr_hint="<b>MP3 máx 48 kHz (rango válido).</b>"
+                    sr_hint="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
                     sr_options=(
-                        "48000" "48 kHz ✦" "Calidad Máxima"
-                        "44100" "44.1 kHz" "CD Estándar"
-                        "32000" "32 kHz" "Radio FM"
-                        "24000" "24 kHz" "Voz clara"
-                        "22050" "22.05 kHz" "Calidad media"
-                    )
-                    ;;
+                        "48000" "48 kHz ✦"    "Calidad máxima"
+                        "44100" "44.1 kHz"    "Estándar CD"
+                    ) ;;
                 mp2)
-                    sr_hint="<b>MP2 solo soporta valores estándar específicos.</b>"
+                    sr_hint="<b>MP2 solo soporta valores de sample rate estándar.</b>"
                     sr_options=(
-                        "48000" "48 kHz" "Video"
-                        "44100" "44.1 kHz ✦" "CD"
-                        "32000" "32 kHz" "Broadcast"
-                        "24000" "24 kHz" "Baja"
-                    )
-                    ;;
+                        "48000" "48 kHz"      "Video"
+                        "44100" "44.1 kHz ✦"  "Estándar CD"
+                    ) ;;
                 aac|m4a)
-                    sr_hint="<b>AAC soporta hasta 96 kHz (Hi-Res limitado).</b>"
+                    sr_hint="<b>AAC soporta hasta 96 kHz (Hi-Res con soporte limitado).</b>"
                     sr_options=(
-                        "orig"   "Sin cambios ✦" "Mantener original"
-                        "96000"  "96 kHz" "Hi-Res AAC"
-                        "48000"  "48 kHz" "Video HD"
-                        "44100"  "44.1 kHz" "CD estándar"
-                    )
-                    ;;
+                        "orig"  "Sin cambios ✦" "Mantener original"
+                        "96000"  "96 kHz"        "Estudio / Hi-Res"
+                        "88200"  "88.2 kHz"      "Múltiplo de CD"
+                        "48000"  "48 kHz"        "Estándar profesional"
+                        "44100"  "44.1 kHz"      "Estándar CD"
+                    ) ;;
                 flac|wav|aiff)
-                    sr_hint="<b>Formatos sin pérdida: Soportan alta resolución profesional.</b>"
+                    sr_hint="<b>Formatos sin pérdida: soportan alta resolución real.</b>"
                     sr_options=(
                         "orig"   "Sin cambios ✦" "Mantener original"
-                        "192000" "192 kHz" "Mastering / Audiófilo"
-                        "96000"  "96 kHz" "Estudio / Hi-Res"
-                        "88200"  "88.2 kHz" "Múltiplo CD"
-                        "48000"  "48 kHz" "Estándar Pro"
-                        "44100"  "44.1 kHz" "Estándar CD"
-                    )
-                    ;;
+                        "192000" "192 kHz"       "Mastering / Audiófilo"
+                        "96000"  "96 kHz"        "Estudio / Hi-Res"
+                        "88200"  "88.2 kHz"      "Múltiplo de CD"
+                        "48000"  "48 kHz"        "Estándar profesional"
+                        "44100"  "44.1 kHz"      "Estándar CD"
+                    ) ;;
                 *)
-                    sr_hint="<i>Selecciona la frecuencia de muestreo deseada.</i>"
                     sr_options=(
-                        "orig"   "Sin cambios ✦" "Mantener original"
-                        "48000"  "48 kHz" "Video / Streaming"
-                        "44100"  "44.1 kHz" "CD estándar"
-                    )
-                    ;;
+                        "orig"  "Sin cambios ✦" "Mantener original"
+                        "48000" "48 kHz"        "Video / Streaming"
+                        "44100" "44.1 kHz"      "Estándar CD"
+                    ) ;;
             esac
             
             SAMPLE_RATE=$(yad --list \
@@ -714,10 +711,7 @@ select_audio_options() {
             
             case $? in
                 1) return 1 ;;
-                2) 
-                    [[ "$IS_LOSSLESS" == "true" ]] && step=3 || step=4
-                    continue
-                    ;;
+                2) return 2 ;;
             esac
             
             [[ -z "$SAMPLE_RATE" ]] && continue
@@ -760,7 +754,7 @@ select_audio_options() {
             
             case $? in
                 1) return 1 ;;
-                2) step=5; continue ;;
+                2) return 2 ;;
             esac
             
             [[ -z "$BIT_DEPTH" ]] && continue
@@ -791,10 +785,7 @@ select_audio_options() {
             
             case $? in
                 1) return 1 ;;
-                2)
-                    [[ "$IS_LOSSLESS" == "true" ]] && step=6 || step=5
-                    continue
-                    ;;
+                2) return 2 ;;
             esac
             
             [[ -z "$OUTPUT_DIR" ]] && continue
@@ -830,11 +821,24 @@ process_conversions() {
         
         # Resolver conflicto si archivo ya existe
         if [[ -f "$output_file" ]]; then
-            output_file=$(resolve_conflict "$output_file" "$safe_name" "$FORMAT" "$OUTPUT_DIR")
-            if (( $? != 0 )); then
-                ((failed_count++))
-                continue
-            fi
+            resolve_conflict "$output_file" "$safe_name" "$FORMAT" "$OUTPUT_DIR"
+            local conflict_result=$?
+            
+            case $conflict_result in
+                0)
+                    # Reemplazar - usar CONFLICT_OUTPUT
+                    output_file="$CONFLICT_OUTPUT"
+                    ;;
+                1)
+                    # Renombrar - usar CONFLICT_OUTPUT con contador
+                    output_file="$CONFLICT_OUTPUT"
+                    ;;
+                *)
+                    # Omitir o Cancel
+                    ((failed_count++))
+                    continue
+                    ;;
+            esac
         fi
         
         # Convertir archivo
@@ -879,25 +883,57 @@ main() {
     # Cargar configuración
     LAST_DIR=$(load_config)
     
-    # Paso 1: Seleccionar archivos
+    # ════════════════════════════════════════════════════════════════
+    # PASO 1: SELECCIONAR ARCHIVOS (Solo una vez)
+    # ════════════════════════════════════════════════════════════════
     if ! select_input_files; then
         exit 0
     fi
     
-    # Paso 2: Confirmar archivos
-    while ! confirm_input_files; do
-        if ! select_input_files; then
-            exit 0
+    # Loop de configuración - permite volver a Paso 2 (confirmación)
+    while true; do
+        # ════════════════════════════════════════════════════════════════
+        # PASO 2: CONFIRMAR ARCHIVOS ← PRIMERA PÁGINA DEL LOOP
+        # ════════════════════════════════════════════════════════════════
+        if ! confirm_input_files; then
+            # Usuario presionó Cancel - Volver a Paso 1
+            if ! select_input_files; then
+                exit 0
+            fi
+            # Reinicia el loop desde Paso 2
+            continue
         fi
+        
+        # ════════════════════════════════════════════════════════════════
+        # PASOS 3-7: CONFIGURACIÓN
+        # ════════════════════════════════════════════════════════════════
+        select_audio_options 3
+        local config_result=$?
+        
+        if (( config_result == 1 )); then
+            # Cancel - Cerrar programa completamente
+            exit 0
+        elif (( config_result == 2 )); then
+            # Atrás - Volver a Paso 2 (confirmación)
+            # El loop while continúa, volviendo a Paso 2
+            continue
+        fi
+        # Si es 0, configuración completada - continuar a conversión
+        
+        # ════════════════════════════════════════════════════════════════
+        # CONVERSIÓN
+        # ════════════════════════════════════════════════════════════════
+        process_conversions
+        local conversion_result=$?
+        
+        if (( conversion_result == 2 )); then
+            # Cancel durante conversión - Volver a Paso 2
+            continue
+        fi
+        
+        # Conversión completada exitosamente
+        exit 0
     done
-    
-    # Pasos 3-7: Configuración de opciones
-    while ! select_audio_options 3; do
-        :
-    done
-    
-    # Conversión
-    process_conversions
 }
 
 # Ejecutar programa principal
