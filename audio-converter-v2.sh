@@ -1,4 +1,1211 @@
 #!/bin/bash
+# =============================================================================
+#  Audio Converter — YAD + FFmpeg/FFprobe + Ripeador de CD
+#  Requiere: yad, ffmpeg, ffprobe, cdparanoia, cd-discid, curl, iconv, numfmt
+# =============================================================================
+
+CONFIG_DIR="$HOME/.config/audio_converter"
+CONFIG_FILE="$CONFIG_DIR/settings.conf"
+HISTORY_FILE="$CONFIG_DIR/history.log"
+CACHE_DIR="$CONFIG_DIR/cddb_cache"
+TEMP_DIR=$(mktemp -d /tmp/audioconv_XXXXXX)
+mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
+
+
+# =============================================================================
+#  LIMPIEZA Y MANEJO DE SEÑALES
+# =============================================================================
+
+cleanup() {
+    rm -rf "$TEMP_DIR"
+    [[ -n "$CD_DEV" && "$MODE" == *"CD de audio"* ]] && eject "$CD_DEV" 2>/dev/null
+}
+trap cleanup EXIT HUP INT TERM
+
+
+# =============================================================================
+#  VERIFICACIÓN DE DEPENDENCIAS
+# =============================================================================
+
+MISSING_DEPS=()
+
+for dep in yad ffmpeg ffprobe curl iconv numfmt; do
+    command -v "$dep" &>/dev/null || MISSING_DEPS+=("$dep")
+done
+
+# cd-discid y cdparanoia solo son necesarios en el modo CD
+for dep in cdparanoia cd-discid; do
+    command -v "$dep" &>/dev/null || MISSING_DEPS+=("$dep (necesario para ripear CDs)")
+done
+
+if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
+    MSG="<b>❌ Faltan dependencias necesarias:</b>\n"
+    for d in "${MISSING_DEPS[@]}"; do
+        MSG+="  • $d\n"
+    done
+    MSG+="\n<i>Instálalas antes de continuar.</i>"
+    yad --error \
+        --title="Dependencias faltantes" \
+        --text="$MSG" \
+        --width=420 \
+        --button="OK:0" 2>/dev/null
+    exit 1
+fi
+
+# Cargar configuración persistente si existe
+LAST_DIR="$HOME"
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+
+# =============================================================================
+#  MENÚ PRINCIPAL
+# =============================================================================
+
+MODE=$(yad --list \
+    --title="🎵 Audio Converter" \
+    --text="<b>¿Qué deseas convertir?</b>" \
+    --column="Modo" \
+    --column="Descripción" \
+    "🗂  Archivos locales" "Convierte archivos de audio desde tu disco" \
+    "💿  CD de audio"      "Ripea y convierte pistas desde un CD" \
+    --width=480 --height=230 \
+    --print-column=1 \
+    --no-headers \
+    --button="gtk-cancel:1" \
+    --button="Continuar ▶:0" 2>/dev/null)
+
+[[ $? -ne 0 || -z "$MODE" ]] && exit 0
+MODE=$(echo "$MODE" | tr -d '|' | xargs)
+
+
+# =============================================================================
+#  FUNCIÓN: clean_filename
+#  Sanea un nombre para uso seguro en el sistema de archivos.
+#  Reemplaza caracteres no permitidos con guiones.
+#  Uso: clean_filename "nombre con caracteres/especiales"
+# =============================================================================
+
+clean_filename() {
+    echo "$1" | sed 's/[/:*?"<>|\\]/-/g'
+}
+
+
+# =============================================================================
+#  FUNCIÓN: select_audio_options [STEP_INICIO]
+#  Asistente de conversión con navegación hacia atrás entre pasos.
+#  Pasos: 3=Formato → 4=Bitrate → 5=Sample Rate → 6=Bit Depth → 7=Carpeta
+#  Exporta: FORMAT, BITRATE_OPT, IS_LOSSLESS, SAMPLE_RATE, BIT_DEPTH, OUTPUT_DIR
+#  Retorna: 0=Confirmar  1=Cancelar  2=Atrás desde Formato (lo maneja el llamador)
+# =============================================================================
+
+select_audio_options() {
+    local START_STEP="${1:-3}"
+    FORMAT=""
+    BITRATE_OPT=""
+    IS_LOSSLESS=false
+    SAMPLE_RATE=""
+    BIT_DEPTH=""
+    OUTPUT_DIR=""
+
+    local STEP=$START_STEP
+
+    while true; do
+        case $STEP in
+
+        # ── Paso 3: Formato de salida ─────────────────────────────────────────
+        3)
+            FORMAT_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Formato de Salida" \
+                --text="<b>Selecciona el formato al que deseas convertir:</b>" \
+                --column="Ext" \
+                --column="Nombre Completo" \
+                --column="Tipo" \
+                "mp3"  "MPEG Audio Layer III"           "Con pérdida" \
+                "aac"  "Advanced Audio Coding"          "Con pérdida" \
+                "flac" "Free Lossless Audio Codec"      "Sin pérdida ✦" \
+                "ogg"  "Ogg Vorbis"                     "Con pérdida" \
+                "wav"  "Waveform Audio File"            "Sin pérdida ✦" \
+                "opus" "Opus Interactive Audio"         "Con pérdida" \
+                "wma"  "Windows Media Audio"            "Con pérdida" \
+                "m4a"  "MPEG-4 Audio"                   "Con pérdida" \
+                "aiff" "Audio Interchange File Format"  "Sin pérdida ✦" \
+                "mp2"  "MPEG Audio Layer II"            "Con pérdida" \
+                --width=520 --height=450 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 2 ]] && return 2          # El llamador decide a dónde retroceder
+            [[ $RC -ne 0 ]] && return 1           # Cancelar o cierre de ventana (incluye 252)
+            [[ -z "$FORMAT_RAW" ]] && continue
+
+            FORMAT=$(echo "$FORMAT_RAW" | tr -d '|' | xargs)
+
+            # Determinar si el formato es sin pérdida
+            IS_LOSSLESS=false
+            case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
+
+            BITRATE_OPT=""
+            STEP=4
+            ;;
+
+        # ── Paso 4: Bitrate (solo formatos con pérdida) ───────────────────────
+        4)
+            # Los formatos sin pérdida no tienen bitrate configurable
+            if [[ "$IS_LOSSLESS" == "true" ]]; then
+                STEP=5
+                continue
+            fi
+
+            QUALITY_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Calidad de Audio" \
+                --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
+                --column="Bitrate" \
+                --column="Calidad" \
+                --column="Uso recomendado" \
+                "64k"  "Baja"       "Voz, podcasts, audiolibros" \
+                "96k"  "Media-baja" "Radio online, streaming básico" \
+                "128k" "Media"      "Música casual, streaming general" \
+                "192k" "Alta"       "Música de buena calidad  ✦" \
+                "256k" "Muy alta"   "Música de alta fidelidad" \
+                "320k" "Máxima"     "Audiófilos, archivos maestros" \
+                --width=540 --height=380 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 2 ]] && { STEP=3; continue; }
+            [[ $RC -ne 0 ]] && return 1           # Cancelar o cierre de ventana (incluye 252)
+            [[ -z "$QUALITY_RAW" ]] && continue
+
+            BITRATE_OPT=$(echo "$QUALITY_RAW" | tr -d '|' | xargs)
+            STEP=5
+            ;;
+
+        # ── Paso 5: Sample Rate ───────────────────────────────────────────────
+        5)
+            local SR_OPTIONS=()
+            local SR_HINT="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
+
+            # Opciones de sample rate diferenciadas por formato
+            case "$FORMAT" in
+                opus)
+                    SR_HINT="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
+                    SR_OPTIONS=(
+                        "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
+                        "44100" "44.1 kHz"    "Estándar CD"
+                    ) ;;
+                mp3)
+                    SR_HINT="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
+                    SR_OPTIONS=(
+                        "48000" "48 kHz ✦"    "Calidad máxima"
+                        "44100" "44.1 kHz"    "Estándar CD"
+                    ) ;;
+                mp2)
+                    SR_HINT="<b>MP2 solo soporta valores de sample rate estándar.</b>"
+                    SR_OPTIONS=(
+                        "48000" "48 kHz"      "Video"
+                        "44100" "44.1 kHz ✦"  "Estándar CD"
+                    ) ;;
+                aac|m4a)
+                    SR_HINT="<b>AAC soporta hasta 96 kHz (Hi-Res con soporte limitado).</b>"
+                    SR_OPTIONS=(
+                        "orig"  "Sin cambios ✦" "Mantener original"
+                        "96000"  "96 kHz"        "Estudio / Hi-Res"
+                        "88200"  "88.2 kHz"      "Múltiplo de CD"
+                        "48000"  "48 kHz"        "Estándar profesional"
+                        "44100"  "44.1 kHz"      "Estándar CD"
+                    ) ;;
+                flac|wav|aiff)
+                    SR_HINT="<b>Formatos sin pérdida: soportan alta resolución real.</b>"
+                    SR_OPTIONS=(
+                        "orig"   "Sin cambios ✦" "Mantener original"
+                        "192000" "192 kHz"       "Mastering / Audiófilo"
+                        "96000"  "96 kHz"        "Estudio / Hi-Res"
+                        "88200"  "88.2 kHz"      "Múltiplo de CD"
+                        "48000"  "48 kHz"        "Estándar profesional"
+                        "44100"  "44.1 kHz"      "Estándar CD"
+                    ) ;;
+                *)
+                    SR_OPTIONS=(
+                        "orig"  "Sin cambios ✦" "Mantener original"
+                        "48000" "48 kHz"        "Video / Streaming"
+                        "44100" "44.1 kHz"      "Estándar CD"
+                    ) ;;
+            esac
+
+            SR_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Sample Rate" \
+                --text="<b>Selecciona el sample rate para $FORMAT:</b>\n$SR_HINT" \
+                --column="Hz" \
+                --column="Nombre" \
+                --column="Uso típico" \
+                "${SR_OPTIONS[@]}" \
+                --width=540 --height=420 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            if [[ $RC -eq 2 ]]; then
+                # Retroceder a bitrate (con pérdida) o a formato (sin pérdida)
+                [[ "$IS_LOSSLESS" == "true" ]] && STEP=3 || STEP=4
+                continue
+            fi
+            [[ $RC -ne 0 ]] && return 1           # Cancelar o cierre de ventana (incluye 252)
+            [[ -z "$SR_RAW" ]] && continue
+
+            local SR_VAL
+            SR_VAL=$(echo "$SR_RAW" | tr -d '|' | xargs)
+
+            # "orig" significa mantener el sample rate del archivo fuente
+            SAMPLE_RATE=""
+            [[ "$SR_VAL" != "orig" ]] && SAMPLE_RATE="$SR_VAL"
+            STEP=6
+            ;;
+
+        # ── Paso 6: Bit Depth (solo formatos sin pérdida) ─────────────────────
+        6)
+            # Los formatos con pérdida no exponen control de bit depth
+            if [[ "$IS_LOSSLESS" == "false" ]]; then
+                STEP=7
+                continue
+            fi
+
+            BD_RAW=$(yad --list \
+                --title="🎵 Audio Converter — Bit Depth" \
+                --text="<b>Selecciona la profundidad de bits:</b>\n<i>Solo aplica a formatos sin pérdida (FLAC, WAV, AIFF).</i>" \
+                --column="Formato ffmpeg" \
+                --column="Bit Depth" \
+                --column="Descripción" \
+                "orig" "Sin cambios ✦" "Mantener la profundidad de bits original" \
+                "s16"  "16 bits"       "Estándar CD — compatible con todos los reproductores" \
+                "s32"  "24 bits (s32)" "Alta resolución — producción y masterización" \
+                "s64"  "32 bits float" "Máxima precisión — edición profesional" \
+                --width=540 --height=340 \
+                --print-column=1 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Siguiente ▶:0" 2>/dev/null)
+
+            local RC=$?
+            [[ $RC -eq 2 ]] && { STEP=5; continue; }
+            [[ $RC -ne 0 ]] && return 1           # Cancelar o cierre de ventana (incluye 252)
+            [[ -z "$BD_RAW" ]] && continue
+
+            local BD_VAL
+            BD_VAL=$(echo "$BD_RAW" | tr -d '|' | xargs)
+
+            # "orig" significa no aplicar conversión de bit depth
+            BIT_DEPTH=""
+            [[ "$BD_VAL" != "orig" ]] && BIT_DEPTH="$BD_VAL"
+            STEP=7
+            ;;
+
+        # ── Paso 7: Carpeta de destino ────────────────────────────────────────
+        7)
+            OUTPUT_DIR=$(yad --file \
+                --title="🎵 Audio Converter — Carpeta de Destino" \
+                --text="<b>Selecciona la carpeta donde se guardarán los archivos convertidos:</b>" \
+                --directory \
+                --filename="$LAST_DIR/" \
+                --width=750 --height=520 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Confirmar ✔:0" 2>/dev/null)
+
+            local RC=$?
+            if [[ $RC -eq 2 ]]; then
+                # Retroceder a bit depth (sin pérdida) o a sample rate (con pérdida)
+                [[ "$IS_LOSSLESS" == "true" ]] && STEP=6 || STEP=5
+                continue
+            fi
+            [[ $RC -ne 0 ]] && return 1           # Cancelar o cierre de ventana (incluye 252)
+            [[ -z "$OUTPUT_DIR" ]] && continue
+
+            # Persistir la última carpeta usada
+            echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
+            break
+            ;;
+        esac
+    done
+
+    return 0
+}
+
+
+# =============================================================================
+#  FUNCIÓN: convert_file INPUT OUTPUT [LABEL_EXTRA]
+#  Convierte un archivo de audio con FFmpeg mostrando barra de progreso.
+#  Retorna: 0=OK  2=Cancelado por el usuario  otro=Error de FFmpeg
+# =============================================================================
+
+convert_file() {
+    local INPUT_FILE="$1"
+    local OUTPUT_FILE="$2"
+    local LABEL_EXTRA="${3:-}"
+
+    local BASENAME
+    BASENAME=$(basename "$INPUT_FILE")
+
+    # Obtener duración del archivo en segundos para calcular el porcentaje
+    local RAW_DUR
+    RAW_DUR=$(ffprobe -v error \
+        -show_entries format=duration \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$INPUT_FILE" 2>/dev/null)
+    local DUR_INT=${RAW_DUR%.*}
+    [[ -z "$DUR_INT" || ! "$DUR_INT" =~ ^[0-9]+$ || "$DUR_INT" -le 0 ]] && DUR_INT=0
+
+    # FIFO para recibir el progreso en tiempo real desde FFmpeg
+    local PIPE
+    PIPE=$(mktemp -u /tmp/audioconv_PIPE_XXXXXX)
+    mkfifo "$PIPE"
+
+    # Construir flags opcionales de sample rate y bit depth
+    local EXTRA_FLAGS=()
+    [[ -n "$SAMPLE_RATE" ]] && EXTRA_FLAGS+=(-ar "$SAMPLE_RATE")
+    [[ -n "$BIT_DEPTH" && "$IS_LOSSLESS" == "true" ]] && EXTRA_FLAGS+=(-sample_fmt "$BIT_DEPTH")
+
+    # Lanzar FFmpeg en segundo plano según el tipo de formato
+    if [[ "$IS_LOSSLESS" == "true" ]]; then
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$INPUT_FILE" -vn "${EXTRA_FLAGS[@]}" \
+               -progress "$PIPE" -nostats \
+               "$OUTPUT_FILE" &
+    else
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$INPUT_FILE" -vn -b:a "$BITRATE_OPT" "${EXTRA_FLAGS[@]}" \
+               -progress "$PIPE" -nostats \
+               "$OUTPUT_FILE" &
+    fi
+    local FFMPEG_PID=$!
+
+    # Construir etiqueta de calidad para mostrar en el diálogo
+    local QLABEL
+    if [[ "${WAV_ONLY:-false}" == "true" ]]; then
+        QLABEL="WAV sin convertir"
+    else
+        QLABEL="$FORMAT"
+        [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
+        [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE} Hz"
+        [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
+    fi
+
+    local DIALOG_TEXT="<b>Convirtiendo:</b>  <i>$BASENAME</i>\n  <b>Calidad:</b>  $QLABEL"
+    [[ -n "$LABEL_EXTRA" ]] && DIALOG_TEXT+="\n$LABEL_EXTRA"
+
+    # Leer el pipe de progreso y alimentar la barra de YAD
+    (
+        local PCT=0
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^out_time_ms=([0-9]+)$ ]]; then
+                local T="${BASH_REMATCH[1]}"
+                if [[ $DUR_INT -gt 0 ]]; then
+                    PCT=$(( T / (DUR_INT * 10000) ))
+                    (( PCT >= 100 )) && PCT=99
+                else
+                    # Duración desconocida: avanzar cíclicamente hasta 97 %
+                    PCT=$(( (PCT + 1) % 98 ))
+                fi
+                echo "$PCT"
+            fi
+            [[ "$line" == "progress=end" ]] && echo "100" && break
+        done < "$PIPE"
+    ) | yad --progress \
+        --title="🔄 Convirtiendo..." \
+        --text="$DIALOG_TEXT" \
+        --percentage=0 \
+        --auto-close \
+        --width=560 \
+        --button="⛔  Cancelar:1" 2>/dev/null
+
+    local YAD_EXIT=$?
+    rm -f "$PIPE"
+
+    # El usuario presionó Cancelar
+    if [[ $YAD_EXIT -ne 0 ]]; then
+        kill "$FFMPEG_PID" 2>/dev/null
+        wait "$FFMPEG_PID" 2>/dev/null
+        rm -f "$OUTPUT_FILE"
+        yad --warning \
+            --title="Cancelado" \
+            --text="<b>⚠ Conversión cancelada.</b>\nEl archivo parcial fue eliminado." \
+            --width=400 \
+            --button="OK:0" 2>/dev/null
+        return 2
+    fi
+
+    wait "$FFMPEG_PID"
+    return $?
+}
+
+
+# =============================================================================
+#  FUNCIÓN: show_final_dialog CONVERTED FAILED TOTAL [ARCHIVOS...]
+#  Muestra el resumen final con estadísticas y accesos rápidos.
+# =============================================================================
+
+show_final_dialog() {
+    local CONVERTED=$1
+    local FAILED=$2
+    local TOTAL=$3
+    shift 3
+    local FILES=("$@")
+
+    # Construir etiqueta de calidad del proceso
+    local QLABEL
+    if [[ "${WAV_ONLY:-false}" == "true" ]]; then
+        QLABEL="WAV sin convertir"
+    else
+        QLABEL="$FORMAT"
+        [[ -n "$BITRATE_OPT" ]] && QLABEL="$FORMAT @ $BITRATE_OPT"
+        [[ -n "$SAMPLE_RATE" ]] && QLABEL+="  ${SAMPLE_RATE} Hz"
+        [[ -n "$BIT_DEPTH"   ]] && QLABEL+="  ${BIT_DEPTH}"
+    fi
+
+    local DONE_TEXT
+    DONE_TEXT="<b><span foreground='#4CAF50' size='large'>✅  ¡Proceso completado!</span></b>\n\n"
+    DONE_TEXT+="  <b>Convertidos:</b>  $CONVERTED de $TOTAL\n"
+    [[ $FAILED -gt 0 ]] && \
+        DONE_TEXT+="  <b><span foreground='#F44336'>Fallidos:</span></b>  $FAILED\n"
+    DONE_TEXT+="  <b>Formato:</b>  $QLABEL\n"
+    DONE_TEXT+="  <b>Ubicación:</b>  $OUTPUT_DIR\n\n"
+
+    # Listar hasta 8 archivos generados con su tamaño
+    if [[ ${#FILES[@]} -gt 0 ]]; then
+        DONE_TEXT+="<b>Archivos generados:</b>\n"
+        local LIMIT=$(( ${#FILES[@]} < 8 ? ${#FILES[@]} : 8 ))
+        for (( i = 0; i < LIMIT; i++ )); do
+            local CF="${FILES[$i]}"
+            local FSIZE
+            FSIZE=$(du -sh "$CF" 2>/dev/null | cut -f1)
+            DONE_TEXT+="  📄 $(basename "$CF")  <i>($FSIZE)</i>\n"
+        done
+        (( ${#FILES[@]} > 8 )) && \
+            DONE_TEXT+="  … y $(( ${#FILES[@]} - 8 )) archivo(s) más\n"
+    fi
+
+    yad --info \
+        --title="✅ Conversión completada" \
+        --text="$DONE_TEXT" \
+        --width=580 --height=360 \
+        --button="🕑  Historial:3" \
+        --button="📂  Abrir carpeta:2" \
+        --button="gtk-ok:0" 2>/dev/null
+
+    local BTN=$?
+    [[ $BTN -eq 2 ]] && xdg-open "$OUTPUT_DIR" &
+
+    if [[ $BTN -eq 3 ]]; then
+        yad --text-info \
+            --title="🕑 Historial de conversiones" \
+            --filename="$HISTORY_FILE" \
+            --width=800 --height=460 \
+            --tail \
+            --button="🗑  Borrar historial:2" \
+            --button="gtk-ok:0" 2>/dev/null
+        [[ $? -eq 2 ]] && > "$HISTORY_FILE"
+    fi
+}
+
+
+# =============================================================================
+#  FUNCIÓN: resolve_conflict EXISTING FNAME FORMAT DIR
+#  Gestiona la colisión cuando el archivo de salida ya existe.
+#  Exporta: OUTPUT_FILE (ruta final), SKIP_FILE=true si el usuario omite
+# =============================================================================
+
+resolve_conflict() {
+    local EXISTING="$1"
+    local FNAME="$2"
+    local FMT="$3"
+    local DIR="$4"
+    SKIP_FILE=false
+
+    local FSIZE FDATE BNAME
+    FSIZE=$(du -sh "$EXISTING" 2>/dev/null | cut -f1)
+    FDATE=$(stat -c "%y" "$EXISTING" 2>/dev/null | cut -d. -f1)
+    BNAME=$(basename "$EXISTING")
+
+    local ACTION
+    ACTION=$(yad --list \
+        --title="⚠ Archivo ya existe" \
+        --text="<b>El archivo ya existe:</b>\n\n  📄 <b>$BNAME</b>\n  Tamaño: <i>$FSIZE</i>  |  Modificado: <i>$FDATE</i>\n\n<b>¿Qué deseas hacer?</b>" \
+        --column="Acción" \
+        --column="Descripción" \
+        "Reemplazar" "Sobreescribir el archivo existente" \
+        "Renombrar"  "Guardar con un nombre nuevo automáticamente" \
+        "Omitir"     "Saltar este archivo y continuar con el siguiente" \
+        --print-column=1 \
+        --width=500 --height=260 \
+        --no-headers \
+        --button="Confirmar:0" 2>/dev/null)
+
+    ACTION=$(echo "$ACTION" | tr -d '|' | xargs)
+
+    case "$ACTION" in
+        Reemplazar)
+            OUTPUT_FILE="$EXISTING"
+            ;;
+        Renombrar)
+            # Buscar el primer sufijo numérico disponible
+            local C=1
+            while [[ -f "$DIR/${FNAME}_${C}.$FMT" ]]; do (( C++ )); done
+            OUTPUT_FILE="$DIR/${FNAME}_${C}.$FMT"
+            ;;
+        *)
+            SKIP_FILE=true
+            ;;
+    esac
+}
+
+
+# =============================================================================
+#  MODO A — ARCHIVOS LOCALES
+# =============================================================================
+
+if [[ "$MODE" == *"Archivos locales"* ]]; then
+
+    # ── Paso 1: Selección de archivos ─────────────────────────────────────────
+    INPUT_RAW=$(yad --file \
+        --title="🎵 Paso 1 — Seleccionar Archivos" \
+        --text="<b>Selecciona uno o varios archivos de audio:</b>\n<i>Usa Ctrl o Shift para seleccionar varios archivos a la vez.</i>" \
+        --multiple \
+        --file-filter="Archivos de Audio|*.mp3 *.aac *.flac *.ogg *.wav *.opus *.wma *.m4a *.aiff *.mp2 *.webm" \
+        --file-filter="Todos los archivos|*" \
+        --width=750 --height=520 \
+        --button="gtk-cancel:1" \
+        --button="Siguiente ▶:0" 2>/dev/null)
+
+    [[ $? -ne 0 || -z "$INPUT_RAW" ]] && exit 0
+
+    # Separar la lista de rutas y validar que cada una exista
+    IFS='|' read -ra RAW_LIST <<< "$INPUT_RAW"
+    INPUT_FILES=()
+    for f in "${RAW_LIST[@]}"; do
+        f="${f#"${f%%[![:space:]]*}"}"   # quitar espacios al inicio
+        f="${f%"${f##*[![:space:]]}"}"   # quitar espacios al final
+        [[ -f "$f" ]] && INPUT_FILES+=("$f")
+    done
+    [[ ${#INPUT_FILES[@]} -eq 0 ]] && exit 1
+
+    FILE_COUNT=${#INPUT_FILES[@]}
+
+    # ── Paso 2: Construir checklist con metadatos de cada archivo ─────────────
+    INFO_ROWS=()
+    for f in "${INPUT_FILES[@]}"; do
+        BNAME=$(basename "$f")
+        RAW2=$(ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_name \
+            -of default=noprint_wrappers=1 "$f" 2>/dev/null)
+        F_DUR2=$(echo "$RAW2"  | grep "^duration="   | head -1 | cut -d= -f2)
+        F_SIZE2=$(echo "$RAW2" | grep "^size="        | head -1 | cut -d= -f2)
+        F_COD2=$(echo "$RAW2"  | grep "^codec_name="  | head -1 | cut -d= -f2)
+        DI2=${F_DUR2%.*}
+        [[ "$DI2" =~ ^[0-9]+$ ]] \
+            && DUR2="$(( DI2 / 60 ))m $(( DI2 % 60 ))s" \
+            || DUR2="N/A"
+        if [[ "$F_SIZE2" =~ ^[0-9]+$ ]]; then
+            SZ2=$(numfmt --to=iec --suffix=B "$F_SIZE2" 2>/dev/null || echo "N/A")
+        else
+            SZ2="N/A"
+        fi
+        INFO_ROWS+=("TRUE" "$BNAME" "${F_COD2:-N/A}" "$DUR2" "$SZ2")
+    done
+
+    # ── Paso 2: Confirmación y deselección de archivos ────────────────────────
+    SELECTED_FILES_RAW=$(yad --list \
+        --title="🎵 Paso 2 — Confirmar Archivos (${FILE_COUNT} archivos)" \
+        --text="<b>Confirma los archivos a convertir:</b>\n<i>Desmarca los que no quieras incluir.</i>" \
+        --checklist \
+        --column="✔" \
+        --column="Nombre" \
+        --column="Códec" \
+        --column="Duración" \
+        --column="Tamaño" \
+        "${INFO_ROWS[@]}" \
+        --print-column=2 \
+        --width=820 --height=460 \
+        --button="gtk-cancel:1" \
+        --button="☑  Todas:2" \
+        --button="Continuar ▶:0" 2>/dev/null)
+
+    BTN_FILES=$?
+    [[ $BTN_FILES -ne 0 && $BTN_FILES -ne 2 ]] && exit 0   # Cancelar o cierre de ventana
+
+    if [[ $BTN_FILES -eq 2 ]]; then
+        # Botón "Todas": incluir todos los archivos originales
+        FINAL_FILES=("${INPUT_FILES[@]}")
+    else
+        # Filtrar solo los archivos seleccionados en el checklist
+        FINAL_FILES=()
+        while IFS= read -r sel_name; do
+            sel_name="${sel_name//|/}"
+            sel_name="${sel_name#"${sel_name%%[![:space:]]*}"}"
+            sel_name="${sel_name%"${sel_name##*[![:space:]]}"}"
+            [[ -z "$sel_name" ]] && continue
+            for orig in "${INPUT_FILES[@]}"; do
+                if [[ "$(basename "$orig")" == "$sel_name" ]]; then
+                    FINAL_FILES+=("$orig")
+                    break
+                fi
+            done
+        done <<< "$SELECTED_FILES_RAW"
+    fi
+
+    if [[ ${#FINAL_FILES[@]} -eq 0 ]]; then
+        yad --warning \
+            --title="Sin archivos" \
+            --text="No seleccionaste ningún archivo." \
+            --width=360 \
+            --button="OK:0" 2>/dev/null
+        exit 0
+    fi
+
+    INPUT_FILES=("${FINAL_FILES[@]}")
+    FILE_COUNT=${#INPUT_FILES[@]}
+
+    # ── Selección de opciones de conversión con soporte de Atrás ─────────────
+    # Si el usuario retrocede desde Formato (RC=2), se vuelve al checklist.
+    while true; do
+        select_audio_options 3
+        RC=$?
+        [[ $RC -ne 0 && $RC -ne 2 ]] && exit 0   # Cancelar o cierre de ventana
+        [[ $RC -eq 0 ]] && break    # Confirmar
+
+        # RC=2: el usuario presionó Atrás desde la pantalla de Formato
+        # Relanzar el checklist para que pueda modificar la selección
+        SELECTED_FILES_RAW=$(yad --list \
+            --title="🎵 Paso 2 — Confirmar Archivos (${FILE_COUNT} archivos)" \
+            --text="<b>Confirma los archivos a convertir:</b>\n<i>Desmarca los que no quieras incluir.</i>" \
+            --checklist \
+            --column="✔" \
+            --column="Nombre" \
+            --column="Códec" \
+            --column="Duración" \
+            --column="Tamaño" \
+            "${INFO_ROWS[@]}" \
+            --print-column=2 \
+            --width=820 --height=460 \
+            --button="gtk-cancel:1" \
+            --button="☑  Todas:2" \
+            --button="Continuar ▶:0" 2>/dev/null)
+
+        BTN_FILES=$?
+        [[ $BTN_FILES -ne 0 && $BTN_FILES -ne 2 ]] && exit 0   # Cancelar o cierre de ventana
+
+        if [[ $BTN_FILES -eq 2 ]]; then
+            FINAL_FILES=("${INPUT_FILES[@]}")
+        else
+            FINAL_FILES=()
+            while IFS= read -r sel_name; do
+                sel_name="${sel_name//|/}"
+                sel_name="${sel_name#"${sel_name%%[![:space:]]*}"}"
+                sel_name="${sel_name%"${sel_name##*[![:space:]]}"}"
+                [[ -z "$sel_name" ]] && continue
+                for orig in "${INPUT_FILES[@]}"; do
+                    [[ "$(basename "$orig")" == "$sel_name" ]] \
+                        && FINAL_FILES+=("$orig") \
+                        && break
+                done
+            done <<< "$SELECTED_FILES_RAW"
+        fi
+
+        if [[ ${#FINAL_FILES[@]} -gt 0 ]]; then
+            INPUT_FILES=("${FINAL_FILES[@]}")
+            FILE_COUNT=${#INPUT_FILES[@]}
+        fi
+    done
+
+    # ── Conversión de cada archivo seleccionado ───────────────────────────────
+    CONVERTED=0
+    FAILED=0
+    CONVERTED_FILES=()
+
+    for INPUT_FILE in "${INPUT_FILES[@]}"; do
+        BASENAME=$(basename "$INPUT_FILE")
+        FNAME="${BASENAME%.*}"
+        OUTPUT_FILE="$OUTPUT_DIR/$(clean_filename "$FNAME").$FORMAT"
+
+        # Resolver conflicto si el archivo de destino ya existe
+        if [[ -f "$OUTPUT_FILE" ]]; then
+            resolve_conflict "$OUTPUT_FILE" "$FNAME" "$FORMAT" "$OUTPUT_DIR"
+            [[ "$SKIP_FILE" == "true" ]] && continue
+        fi
+
+        convert_file "$INPUT_FILE" "$OUTPUT_FILE"
+        CONV_RESULT=$?
+        [[ $CONV_RESULT -eq 2 ]] && exit 0   # Cancelado por el usuario
+
+        if [[ $CONV_RESULT -eq 0 ]]; then
+            (( CONVERTED++ ))
+            CONVERTED_FILES+=("$OUTPUT_FILE")
+            # Registrar en historial
+            _HIST_LABEL="${BITRATE_OPT:-lossless}"
+            [[ -n "$SAMPLE_RATE" ]] && _HIST_LABEL+=" ${SAMPLE_RATE} Hz"
+            [[ -n "$BIT_DEPTH"   ]] && _HIST_LABEL+=" ${BIT_DEPTH}"
+            echo "$(date '+%Y-%m-%d %H:%M')  |  $BASENAME  →  $(basename "$OUTPUT_FILE")  |  $_HIST_LABEL  |  $OUTPUT_DIR" \
+                >> "$HISTORY_FILE"
+        else
+            (( FAILED++ ))
+            rm -f "$OUTPUT_FILE"
+        fi
+    done
+
+    show_final_dialog "$CONVERTED" "$FAILED" "$FILE_COUNT" "${CONVERTED_FILES[@]}"
+
+
+# =============================================================================
+#  MODO B — CD DE AUDIO
+# =============================================================================
+
+elif [[ "$MODE" == *"CD de audio"* ]]; then
+
+    # ── Detectar dispositivo de CD ────────────────────────────────────────────
+    CD_DEV=""
+    for dev in /dev/cdrom /dev/sr0 /dev/sr1 /dev/dvd; do
+        [[ -b "$dev" ]] && CD_DEV="$dev" && break
+    done
+
+    if [[ -z "$CD_DEV" ]]; then
+        yad --error \
+            --title="CD no encontrado" \
+            --text="<b>❌ No se detectó ningún dispositivo de CD.</b>\n\nVerifica que:\n  • El CD está insertado correctamente\n  • El dispositivo existe en /dev/cdrom o /dev/sr0" \
+            --width=440 \
+            --button="OK:0" 2>/dev/null
+        exit 1
+    fi
+
+    # ── Leer tabla de contenidos (TOC) y disc-id ──────────────────────────────
+    yad --progress \
+        --title="💿 Leyendo CD..." \
+        --text="<b>Leyendo tabla de contenidos del disco...</b>" \
+        --pulsate --auto-close --no-buttons --width=420 2>/dev/null &
+    PULSE_PID=$!
+
+    DISC_ID=$(cd-discid "$CD_DEV" 2>/dev/null)
+    CD_INFO=$(cdparanoia -Q -d "$CD_DEV" 2>&1)
+
+    kill "$PULSE_PID" 2>/dev/null
+    wait "$PULSE_PID" 2>/dev/null
+
+    if [[ -z "$DISC_ID" ]]; then
+        yad --error \
+            --title="Error al leer CD" \
+            --text="<b>❌ No se pudo leer el CD.</b>\n\nVerifica que es un CD de audio válido y que no está dañado." \
+            --width=420 \
+            --button="OK:0" 2>/dev/null
+        exit 1
+    fi
+
+    # ── Parsear pistas del TOC de cdparanoia ─────────────────────────────────
+    # Formato de salida de cdparanoia -Q:
+    #   N.    SECTORS [MM:SS.FF]    OFFSET [MM:SS.FF]    pre  copy  channels
+    # Capturamos: número de pista y duración [MM:SS]
+    declare -a TRACKS_DATA
+    declare -A TRACK_DUR_STR
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]+([0-9]+)\.[[:space:]]+[0-9]+[[:space:]]+\[([0-9]+):([0-9]+)\.[0-9]+\] ]]; then
+            TNUM="${BASH_REMATCH[1]}"
+            T_MIN="${BASH_REMATCH[2]}"
+            T_SEC="${BASH_REMATCH[3]}"
+            TRACK_DUR_STR[$TNUM]="${T_MIN}:${T_SEC}"
+            TRACKS_DATA+=("$TNUM" "${T_MIN}:${T_SEC}")
+        fi
+    done <<< "$CD_INFO"
+
+    if [[ ${#TRACKS_DATA[@]} -eq 0 ]]; then
+        yad --error \
+            --title="Error al leer pistas" \
+            --text="<b>❌ No se pudieron leer las pistas del CD.</b>\n\nIntenta limpiar el disco y vuelve a intentarlo." \
+            --width=480 \
+            --button="OK:0" 2>/dev/null
+        exit 1
+    fi
+
+    # ── Consultar metadata en gnudb (protocolo freedb) ───────────────────────
+    yad --progress \
+        --title="💿 Buscando metadata..." \
+        --text="<b>Consultando gnudb.gnudb.org...</b>\n<i>Buscando artista, álbum y nombres de pistas</i>" \
+        --pulsate --auto-close --no-buttons --width=440 2>/dev/null &
+    PULSE_PID=$!
+
+    # Descomponer el disc-id en sus partes: DISCID TRACKS OFF1 ... TOTAL_SECS
+    DISC_ID_PARTS=($DISC_ID)
+    DISCID_HEX="${DISC_ID_PARTS[0]}"
+    NUM_TRACKS_ID="${DISC_ID_PARTS[1]}"
+    OFFSETS=("${DISC_ID_PARTS[@]:2:$NUM_TRACKS_ID}")
+    TOTAL_SECS="${DISC_ID_PARTS[-1]}"
+    OFFSETS_QUERY=$(IFS=+; echo "${OFFSETS[*]}")
+
+    # Construir URL de consulta al servidor gnudb
+    GNUDB_QUERY="cmd=cddb+query+${DISCID_HEX}+${NUM_TRACKS_ID}+${OFFSETS_QUERY}+${TOTAL_SECS}"
+    GNUDB_HELLO="hello=$(whoami)+$(hostname)+AudioConverter+1.0"
+    GNUDB_URL="http://gnudb.gnudb.org/~cddb/cddb.cgi?${GNUDB_QUERY}&${GNUDB_HELLO}&proto=6"
+
+    # Usar caché local para evitar consultar gnudb en discos ya procesados
+    if [[ -f "$CACHE_DIR/$DISCID_HEX" ]]; then
+        GNUDB_RESULT=$(cat "$CACHE_DIR/$DISCID_HEX")
+    else
+        GNUDB_RESULT=$(curl -sL -A "AudioConverter/1.0" --max-time 10 "$GNUDB_URL" 2>/dev/null)
+        [[ -n "$GNUDB_RESULT" ]] && echo "$GNUDB_RESULT" > "$CACHE_DIR/$DISCID_HEX"
+    fi
+
+    # Valores por defecto si no se encuentra metadata
+    ARTIST="Desconocido"
+    ALBUM="CD de Audio"
+    YEAR=""
+    declare -A TRACK_NAMES
+    META_SOURCE="<span foreground='#FF9800'>⚠ Metadata no encontrada — usando nombres genéricos</span>"
+
+    if [[ -n "$GNUDB_RESULT" ]]; then
+        RESP_CODE=$(echo "$GNUDB_RESULT" | head -1 | awk '{print $1}')
+
+        # Códigos de respuesta: 200=exacta  210=múltiple (lista)  211=resultado aproximado
+        if [[ "$RESP_CODE" == "200" || "$RESP_CODE" == "210" || "$RESP_CODE" == "211" ]]; then
+
+            if [[ "$RESP_CODE" == "200" ]]; then
+                # Coincidencia exacta: leer categoría e ID de la primera línea
+                CDDB_CAT=$(echo "$GNUDB_RESULT" | head -1 | awk '{print $2}')
+                CDDB_ID=$(echo  "$GNUDB_RESULT" | head -1 | awk '{print $3}')
+            else
+                # Coincidencias múltiples: tomar el primer resultado (línea 2)
+                CDDB_CAT=$(echo "$GNUDB_RESULT" | sed -n '2p' | awk '{print $1}')
+                CDDB_ID=$(echo  "$GNUDB_RESULT" | sed -n '2p' | awk '{print $2}')
+            fi
+
+            # Obtener la entrada completa del disco
+            READ_URL="http://gnudb.gnudb.org/~cddb/cddb.cgi?cmd=cddb+read+${CDDB_CAT}+${CDDB_ID}&${GNUDB_HELLO}&proto=6"
+            CDDB_ENTRY=$(curl -sL -A "AudioConverter/1.0" --max-time 10 "$READ_URL" 2>/dev/null)
+
+            # gnudb usa line endings Windows (\r\n); normalizar a Unix (\n)
+            CDDB_ENTRY=$(printf '%s' "$CDDB_ENTRY" | tr -d '\r')
+
+            # CDs antiguos pueden tener metadata en ISO-8859-1; convertir si no es UTF-8 válido
+            if ! printf '%s' "$CDDB_ENTRY" | iconv -f utf-8 -t utf-8 >/dev/null 2>&1; then
+                CDDB_ENTRY=$(printf '%s' "$CDDB_ENTRY" \
+                    | iconv -f iso-8859-1 -t utf-8 2>/dev/null \
+                    || printf '%s' "$CDDB_ENTRY")
+            fi
+
+            if [[ -n "$CDDB_ENTRY" ]]; then
+                DTITLE=$(echo "$CDDB_ENTRY" | grep "^DTITLE=" | head -1 | cut -d= -f2-)
+                DYEAR=$(echo  "$CDDB_ENTRY" | grep "^DYEAR="  | head -1 | cut -d= -f2-)
+
+                # DTITLE puede venir como "Artista / Álbum" o solo "Álbum"
+                if [[ "$DTITLE" == *" / "* ]]; then
+                    ARTIST=$(echo "$DTITLE" | sed 's/ \/ .*//')
+                    ALBUM=$(echo  "$DTITLE" | sed 's/.*\/ //')
+                else
+                    ALBUM="$DTITLE"
+                fi
+                [[ -n "$DYEAR" ]] && YEAR="$DYEAR"
+
+                # Extraer nombres de pistas (TTITLEn está indexado desde 0)
+                while IFS= read -r line; do
+                    if [[ "$line" =~ ^TTITLE([0-9]+)=(.+)$ ]]; then
+                        local IDX="${BASH_REMATCH[1]}"
+                        local NAME="${BASH_REMATCH[2]}"
+                        TRACK_NAMES[$(( IDX + 1 ))]="$NAME"
+                    fi
+                done <<< "$CDDB_ENTRY"
+
+                META_SOURCE="<span foreground='#4CAF50'>✔ Metadata encontrada en gnudb</span>"
+            fi
+        fi
+    fi
+
+    kill "$PULSE_PID" 2>/dev/null
+    wait "$PULSE_PID" 2>/dev/null
+
+    # ── Construir lista de pistas para el checklist ───────────────────────────
+    declare -a TRACKS_LIST
+    for (( i = 0; i < ${#TRACKS_DATA[@]}; i += 2 )); do
+        TNUM="${TRACKS_DATA[$i]}"
+        T_DUR="${TRACKS_DATA[$(( i + 1 ))]}"
+        TNAME="${TRACK_NAMES[$TNUM]:-Pista $TNUM}"
+        TRACKS_LIST+=("TRUE" "$TNUM" "$TNAME" "$T_DUR")
+    done
+
+    YEAR_STR=""
+    [[ -n "$YEAR" ]] && YEAR_STR=" ($YEAR)"
+
+    # ── Selección de pistas a ripear ──────────────────────────────────────────
+    SELECTED_RAW=$(yad --list \
+        --title="💿 CD de Audio — Seleccionar Pistas" \
+        --text="<b>Álbum:</b>  $ALBUM$YEAR_STR\n<b>Artista:</b>  $ARTIST\n$META_SOURCE\n\n<i>Selecciona las pistas que deseas ripear:</i>" \
+        --checklist \
+        --column="✔" \
+        --column="Núm" \
+        --column="Título" \
+        --column="Duración" \
+        "${TRACKS_LIST[@]}" \
+        --print-column=2 \
+        --width=620 --height=520 \
+        --button="gtk-cancel:1" \
+        --button="☑  Todas:2" \
+        --button="Siguiente ▶:0" 2>/dev/null)
+
+    BTN_TRACKS=$?
+    [[ $BTN_TRACKS -ne 0 && $BTN_TRACKS -ne 2 ]] && exit 0   # Cancelar o cierre de ventana
+
+    if [[ $BTN_TRACKS -eq 2 ]]; then
+        # Seleccionar todas las pistas detectadas
+        SEL_TRACKS=()
+        for (( i = 0; i < ${#TRACKS_DATA[@]}; i += 2 )); do
+            SEL_TRACKS+=("${TRACKS_DATA[$i]}")
+        done
+    else
+        # Parsear los números de pista seleccionados del output de YAD
+        SEL_TRACKS=()
+        while IFS= read -r t; do
+            t="${t//|/}"
+            t="${t#"${t%%[![:space:]]*}"}"
+            [[ -n "$t" ]] && SEL_TRACKS+=("$t")
+        done <<< "$SELECTED_RAW"
+    fi
+
+    if [[ ${#SEL_TRACKS[@]} -eq 0 ]]; then
+        yad --warning \
+            --title="Sin selección" \
+            --text="No seleccionaste ninguna pista." \
+            --width=360 \
+            --button="OK:0" 2>/dev/null
+        exit 0
+    fi
+
+    # ── Funciones auxiliares para el modo de ripeado ──────────────────────────
+
+    # Muestra el diálogo de selección de velocidad/modo de ripeado
+    _show_speed_dialog() {
+        RIP_SPEED_RAW=$(yad --list \
+            --title="💿 CD de Audio — Modo de Ripeado" \
+            --text="<b>Selecciona cómo deseas ripear el CD:</b>\n<i>«Solo WAV» guarda las pistas tal cual, sin convertir ni recodificar.</i>" \
+            --column="Modo" \
+            --column="Velocidad estimada" \
+            --column="Descripción" \
+            "Rápido"    "5–10x más rápido"  "Conversión al formato elegido — recomendado para CDs limpios  ✦" \
+            "Normal"    "2–3x más rápido"   "Conversión al formato elegido — con corrección básica de errores" \
+            "Paranoid"  "Tiempo real"       "Conversión al formato elegido — para CDs rayados o dañados" \
+            "Solo WAV"  "5–10x más rápido"  "Copia WAV sin convertir — máxima fidelidad, sin recodificación" \
+            --width=660 --height=310 \
+            --print-column=1 \
+            --button="gtk-cancel:1" \
+            --button="Siguiente ▶:0" 2>/dev/null)
+        return $?
+    }
+
+    # Aplica los flags de cdparanoia según el modo seleccionado
+    _apply_speed() {
+        RIP_SPEED=$(echo "$RIP_SPEED_RAW" | tr -d '|' | xargs)
+        case "$RIP_SPEED" in
+            "Rápido")   CDPARA_FLAGS="-Z"; WAV_ONLY=false ;;
+            "Normal")   CDPARA_FLAGS="-z"; WAV_ONLY=false ;;
+            "Paranoid") CDPARA_FLAGS="";   WAV_ONLY=false ;;
+            "Solo WAV") CDPARA_FLAGS="-Z"; WAV_ONLY=true  ;;
+            *)          CDPARA_FLAGS="-Z"; WAV_ONLY=false ;;
+        esac
+    }
+
+    # ── Selección de velocidad de ripeado y opciones de conversión ────────────
+    WAV_ONLY=false
+    FORMAT="wav"       # valor por defecto; se sobreescribe si el usuario elige conversión
+    CDPARA_FLAGS="-Z"
+
+    _show_speed_dialog || exit 0
+    [[ -z "$RIP_SPEED_RAW" ]] && exit 0
+    _apply_speed
+
+    # Bucle de navegación: WAV_ONLY solo pide carpeta; modo conversión usa el asistente completo
+    while true; do
+        if [[ "$WAV_ONLY" == "true" ]]; then
+            OUTPUT_DIR=$(yad --file \
+                --title="💿 CD de Audio — Carpeta de Destino (WAV)" \
+                --text="<b>Selecciona la carpeta donde se guardarán los archivos WAV:</b>\n<i>Se creará una subcarpeta con el nombre del álbum.</i>" \
+                --directory \
+                --filename="$LAST_DIR/" \
+                --width=750 --height=520 \
+                --button="gtk-cancel:1" \
+                --button="◀ Atrás:2" \
+                --button="Confirmar ✔:0" 2>/dev/null)
+
+            RC=$?
+            if [[ $RC -eq 2 ]]; then
+                # Volver al diálogo de velocidad
+                _show_speed_dialog || exit 0
+                [[ -z "$RIP_SPEED_RAW" ]] && exit 0
+                _apply_speed
+                continue
+            fi
+            [[ $RC -ne 0 ]] && exit 0             # Cancelar o cierre de ventana
+            [[ -z "$OUTPUT_DIR" ]] && continue
+
+            echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
+            FORMAT="wav"
+            IS_LOSSLESS=true
+            BITRATE_OPT=""
+            break
+        else
+            select_audio_options 3
+            RC=$?
+            [[ $RC -ne 0 && $RC -ne 2 ]] && exit 0   # Cancelar o cierre de ventana
+            [[ $RC -eq 0 ]] && break
+            # RC=2: Atrás desde Formato → volver al diálogo de velocidad
+            _show_speed_dialog || exit 0
+            [[ -z "$RIP_SPEED_RAW" ]] && exit 0
+            _apply_speed
+        fi
+    done
+
+    # ── Crear subcarpeta del álbum ────────────────────────────────────────────
+    SAFE_ALBUM=$(clean_filename "$ALBUM")
+    ALBUM_DIR="$OUTPUT_DIR/$SAFE_ALBUM"
+    mkdir -p "$ALBUM_DIR"
+
+    # ── Ripeado y conversión de cada pista seleccionada ───────────────────────
+    CONVERTED=0
+    FAILED=0
+    CONVERTED_FILES=()
+    TOTAL_SEL=${#SEL_TRACKS[@]}
+
+    for TNUM in "${SEL_TRACKS[@]}"; do
+        TRACK_IDX=$(( CONVERTED + FAILED + 1 ))
+        TNAME="${TRACK_NAMES[$TNUM]:-Pista $TNUM}"
+        SAFE_TNAME=$(clean_filename "$TNAME")
+        TRACK_FILENAME=$(printf "%02d - %s" "$TNUM" "$SAFE_TNAME")
+        WAV_FILE="$TEMP_DIR/track${TNUM}.wav"
+        OUTPUT_FILE="$ALBUM_DIR/$TRACK_FILENAME.$FORMAT"
+
+        # Resolver conflicto si el archivo ya existe en el destino
+        if [[ -f "$OUTPUT_FILE" ]]; then
+            resolve_conflict "$OUTPUT_FILE" "$TRACK_FILENAME" "$FORMAT" "$ALBUM_DIR"
+            [[ "$SKIP_FILE" == "true" ]] && continue
+        fi
+
+        # ── Ripeado con cdparanoia ──────────────────────────────────────────
+        RIP_LOG="$TEMP_DIR/rip_${TNUM}.log"
+        RIP_PIPE=$(mktemp -u /tmp/audioconv_RIP_XXXXXX)
+        mkfifo "$RIP_PIPE"
+        trap "rm -f '$RIP_PIPE'" PIPE   # limpiar el pipe ante señal SIGPIPE
+
+        # Iniciar cdparanoia en segundo plano
+        cdparanoia ${CDPARA_FLAGS} -d "$CD_DEV" "$TNUM" "$WAV_FILE" \
+            > "$RIP_LOG" 2>&1 &
+        CDPARA_PID=$!
+
+        # Proceso feeder: envía pulsos de progreso mientras cdparanoia esté activo
+        (
+            while kill -0 "$CDPARA_PID" 2>/dev/null; do
+                echo "1"
+                sleep 0.5
+            done
+            echo "100"   # forzar cierre de la barra al terminar
+        ) > "$RIP_PIPE" &
+        FEEDER_PID=$!
+
+        yad --progress \
+            --title="💿 Ripeando pista $TRACK_IDX de $TOTAL_SEL..." \
+            --text="<b>Ripeando del CD:</b>  Pista $TNUM — <i>$TNAME</i>\n  <b>Álbum:</b>  $ALBUM\n  <b>Artista:</b>  $ARTIST\n\n  <i>Esto puede tardar unos minutos…</i>" \
+            --pulsate \
+            --auto-close \
+            --width=580 \
+            --button="⛔  Cancelar:1" < "$RIP_PIPE" 2>/dev/null
+        YAD_RIP=$?
+
+        # Detener el feeder y limpiar el pipe
+        kill "$FEEDER_PID" 2>/dev/null
+        wait "$FEEDER_PID" 2>/dev/null
+        rm -f "$RIP_PIPE"
+
+        if [[ $YAD_RIP -ne 0 ]]; then
+            # El usuario canceló el ripeado
+            kill "$CDPARA_PID" 2>/dev/null
+            wait "$CDPARA_PID" 2>/dev/null
+            rm -f "$WAV_FILE" "$RIP_LOG"
+            yad --warning \
+                --title="Cancelado" \
+                --text="<b>⚠ Ripeado cancelado.</b>" \
+                --width=380 \
+                --button="OK:0" 2>/dev/null
+            exit 0
+        fi
+
+        wait "$CDPARA_PID"
+        RIP_EXIT=$?
+
+        if [[ $RIP_EXIT -ne 0 || ! -f "$WAV_FILE" ]]; then
+            yad --error \
+                --title="Error al ripear" \
+                --text="<b>❌ Error al ripear la pista $TNUM.</b>\n\nRevisa que el CD no esté rayado o dañado." \
+                --width=400 \
+                --button="OK:0" 2>/dev/null
+            (( FAILED++ ))
+            continue
+        fi
+
+        # ── Conversión WAV → formato destino (o copiar si es Solo WAV) ────────
+        if [[ "$WAV_ONLY" == "true" ]]; then
+            mv "$WAV_FILE" "$OUTPUT_FILE"
+            CONV_RESULT=$?
+        else
+            convert_file "$WAV_FILE" "$OUTPUT_FILE" \
+                "  <b>Álbum:</b>  $ALBUM  —  Pista $TNUM / $TOTAL_SEL"
+            CONV_RESULT=$?
+            rm -f "$WAV_FILE"
+            [[ $CONV_RESULT -eq 2 ]] && exit 0   # Cancelado por el usuario
+        fi
+
+        # ── Incrustar metadata con FFmpeg ─────────────────────────────────────
+        if [[ $CONV_RESULT -eq 0 ]]; then
+            TMP_META="$TEMP_DIR/meta_${TNUM}.$FORMAT"
+            META_ARGS=(
+                -metadata "title=$TNAME"
+                -metadata "artist=$ARTIST"
+                -metadata "album=$ALBUM"
+                -metadata "track=$TNUM"
+            )
+            [[ -n "$YEAR" ]] && META_ARGS+=(-metadata "date=$YEAR")
+
+            ffmpeg -hide_banner -loglevel error -y \
+                   -i "$OUTPUT_FILE" -vn "${META_ARGS[@]}" -codec copy \
+                   "$TMP_META" \
+                && mv "$TMP_META" "$OUTPUT_FILE" \
+                || rm -f "$TMP_META"
+
+            (( CONVERTED++ ))
+            CONVERTED_FILES+=("$OUTPUT_FILE")
+
+            # Registrar en historial
+            QLABEL="${WAV_ONLY:+WAV sin convertir}"
+            [[ -z "$QLABEL" ]] && QLABEL="${BITRATE_OPT:-lossless}"
+            echo "$(date '+%Y-%m-%d %H:%M')  |  CD: $ALBUM — $TNAME  →  $TRACK_FILENAME.$FORMAT  |  $QLABEL  |  $ALBUM_DIR" \
+                >> "$HISTORY_FILE"
+        else
+            (( FAILED++ ))
+            rm -f "$OUTPUT_FILE"
+        fi
+    done
+
+    # ── Resumen final y expulsión del disco ───────────────────────────────────
+    OUTPUT_DIR="$ALBUM_DIR"
+    show_final_dialog "$CONVERTED" "$FAILED" "$TOTAL_SEL" "${CONVERTED_FILES[@]}"
+
+    # Expulsar el CD; limpiar CD_DEV para que el trap no lo expulse por segunda vez
+    eject "$CD_DEV" 2>/dev/null
+    CD_DEV=""
+
+fi
+
+exit 0
+#!/bin/bash
 # ════════════════════════════════════════════════════════════════
 #  Audio Converter — YAD + FFmpeg/FFprobe + CD Ripper
 #  Fix: regex cdparanoia + metadata via gnudb (freedb)
