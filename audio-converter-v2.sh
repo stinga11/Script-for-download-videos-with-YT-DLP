@@ -362,6 +362,13 @@ select_audio_options() {
         # PASO 5: SAMPLE RATE
         ########################################################################
         5)
+            # Opus siempre resamplea internamente a 48000 Hz — saltar el diálogo
+            if [[ "$FORMAT" == "opus" ]]; then
+                SAMPLE_RATE="48000"
+                step=6
+                continue
+            fi
+
             local -a sr_options=()
             local sr_hint="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
 
