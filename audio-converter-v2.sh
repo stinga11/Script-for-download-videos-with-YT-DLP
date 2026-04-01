@@ -378,20 +378,8 @@ select_audio_options() {
                     sr_options=(
                         "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
                     ) ;;
-                mp3)
-                    sr_hint="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
-                    sr_options=(
-                        "48000" "48 kHz ✦"    "Calidad máxima"
-                        "44100" "44.1 kHz"    "Estándar CD"
-                    ) ;;
-                mp2)
-                    sr_hint="<b>MP2 solo soporta valores de sample rate estándar.</b>"
-                    sr_options=(
-                        "48000" "48 kHz"      "Video"
-                        "44100" "44.1 kHz ✦"  "Estándar CD"
-                    ) ;;
                 aac|m4a)
-                    sr_hint="<b>AAC soporta hasta 96 kHz (Hi-Res con soporte limitado).</b>"
+                    sr_hint="<b>AAC/M4A soporta hasta 96 kHz (Hi-Res con soporte limitado).</b>"
                     sr_options=(
                         "orig"   "Sin cambios ✦" "Mantener original"
                         "96000"  "96 kHz"        "Estudio / Hi-Res"
