@@ -353,6 +353,13 @@ select_audio_options() {
         # PASO 5: SAMPLE RATE
         ########################################################################
         5)
+            # Opus siempre resamplea internamente a 48000 Hz — saltar el diálogo
+            if [[ "$FORMAT" == "opus" ]]; then
+                SAMPLE_RATE="48000"
+                step=6
+                continue
+            fi
+
             local -a sr_options=()
             local sr_hint="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
 
@@ -361,6 +368,7 @@ select_audio_options() {
                     sr_hint="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
                     sr_options=(
                         "48000" "48 kHz (Recomendado ✦)" "Estándar Opus"
+                        "44100" "44.1 kHz"    "Estándar CD"
                     ) ;;
                 mp3)
                     sr_hint="<b>MP3 no soporta frecuencias superiores a 48 kHz.</b>"
