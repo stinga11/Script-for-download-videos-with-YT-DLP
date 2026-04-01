@@ -1,12 +1,12 @@
 #!/bin/bash
 ################################################################################
-# Audio Converter v2 — YAD + FFmpeg/FFprobe
-# 
+# Audio Converter V1 — YAD + FFmpeg/FFprobe
+#
 # Convierte archivos de audio locales en lote con interfaz gráfica interactiva.
 # Permite seleccionar formato, bitrate, sample rate y opciones de calidad.
 #
 # REQUISITOS: yad, ffmpeg, ffprobe, numfmt (coreutils)
-# USO: ./audio_converter_fixed.sh
+# USO: ./audio_converter.sh
 ################################################################################
 
 ################################################################################
@@ -16,8 +16,8 @@ readonly CONFIG_DIR="$HOME/.config/audio_converter"
 readonly CONFIG_FILE="$CONFIG_DIR/settings.conf"
 readonly HISTORY_FILE="$CONFIG_DIR/history.log"
 readonly TEMP_DIR=$(mktemp -d /tmp/audioconv_XXXXXX)
+WAV_ONLY=false
 
-# Crear directorio de configuración si no existe
 mkdir -p "$CONFIG_DIR"
 
 ################################################################################
@@ -30,26 +30,23 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 ################################################################################
-# VERIFICACIÓN DE DEPENDENCIAS REQUERIDAS
+# VERIFICACIÓN DE DEPENDENCIAS
 ################################################################################
 verify_dependencies() {
     local missing_deps=()
-    local required_commands=("yad" "ffmpeg" "ffprobe" "numfmt")
-    
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
-            missing_deps+=("$cmd")
-        fi
+
+    for dep in yad ffmpeg ffprobe numfmt; do
+        command -v "$dep" &>/dev/null || missing_deps+=("$dep")
     done
-    
+
     if (( ${#missing_deps[@]} > 0 )); then
         local msg="<b>❌ Faltan dependencias necesarias:</b>\n\n"
-        for dep in "${missing_deps[@]}"; do
-            msg+="  • <b>$dep</b>\n"
+        for d in "${missing_deps[@]}"; do
+            msg+="  • <b>$d</b>\n"
         done
         msg+="\n<i>Instálalas antes de continuar:</i>\n"
         msg+="  <tt>sudo apt install ${missing_deps[*]}</tt>"
-        
+
         yad --error \
             --title="⚠️  Dependencias faltantes" \
             --text="$msg" \
@@ -64,12 +61,7 @@ verify_dependencies() {
 ################################################################################
 load_config() {
     local last_dir="$HOME"
-    
-    if [[ -f "$CONFIG_FILE" ]]; then
-        # Sourcing seguro con validación
-        source "$CONFIG_FILE" 2>/dev/null || true
-    fi
-    
+    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE" 2>/dev/null || true
     echo "$last_dir"
 }
 
@@ -78,308 +70,58 @@ load_config() {
 ################################################################################
 clean_filename() {
     local filename="$1"
-    
-    # Reemplazar caracteres especiales por guiones
     filename=$(echo "$filename" | sed 's/[/:*?"<>|\\]/-/g')
-    
-    # Eliminar espacios múltiples
     filename=$(echo "$filename" | sed 's/--*/-/g')
-    
-    # Eliminar guiones al inicio/final
     filename="${filename#-}"
     filename="${filename%-}"
-    
     echo "$filename"
 }
 
 ################################################################################
 # FUNCIÓN: Resolver conflictos de nombre de archivo duplicado
-# Retorna: 0=Reemplazar, 1=Renombrar, 2=Omitir/Cancel
-# Establece variable global CONFLICT_OUTPUT con la ruta
+# Exporta: OUTPUT_FILE (ruta final), SKIP_FILE=true si el usuario omite
 ################################################################################
 resolve_conflict() {
-    local existing_file="$1"
-    local filename="$2"
-    local format="$3"
-    local output_dir="$4"
-    
-    local file_size
-    local file_date
-    local base_name
-    
-    # Obtener información del archivo existente
-    file_size=$(du -sh "$existing_file" 2>/dev/null | cut -f1)
-    file_date=$(stat -c "%y" "$existing_file" 2>/dev/null | cut -d. -f1)
-    base_name=$(basename "$existing_file")
-    
-    # Mostrar diálogo de conflicto
+    local existing="$1"
+    local fname="$2"
+    local fmt="$3"
+    local dir="$4"
+    SKIP_FILE=false
+
+    local fsize fdate bname
+    fsize=$(du -sh "$existing" 2>/dev/null | cut -f1)
+    fdate=$(stat -c "%y" "$existing" 2>/dev/null | cut -d. -f1)
+    bname=$(basename "$existing")
+
     local action
     action=$(yad --list \
         --title="⚠️  Archivo ya existe" \
-        --text="<b>El archivo ya existe en el sistema:</b>\n\n  📄 <b>$base_name</b>\n  Tamaño: <i>$file_size</i> | Modificado: <i>$file_date</i>\n\n<b>¿Qué deseas hacer?</b>" \
+        --text="<b>El archivo ya existe en el sistema:</b>\n\n  📄 <b>$bname</b>\n  Tamaño: <i>$fsize</i>  |  Modificado: <i>$fdate</i>\n\n<b>¿Qué deseas hacer?</b>" \
         --column="Acción" \
         --column="Descripción" \
-        "Reemplazar"  "Sobreescribir completamente" \
-        "Renombrar"   "Guardar con número secuencial" \
-        "Omitir"      "Saltar este archivo" \
+        "Reemplazar" "Sobreescribir el archivo existente" \
+        "Renombrar"  "Guardar con un nombre nuevo automáticamente" \
+        "Omitir"     "Saltar este archivo y continuar con el siguiente" \
         --print-column=1 \
-        --width=520 \
-        --height=260 \
+        --width=520 --height=260 \
+        --no-headers \
         --button="Confirmar:0" 2>/dev/null)
-    
-    local dialog_result=$?
-    
-    # Si se presionó Cancel (X o Esc), considerar como "Omitir"
-    if (( dialog_result != 0 )); then
-        CONFLICT_OUTPUT=""
-        return 2
-    fi
-    
-    # Limpiar salida
+
     action=$(echo "$action" | tr -d '|' | xargs)
-    
+
     case "$action" in
         Reemplazar)
-            CONFLICT_OUTPUT="$existing_file"
-            return 0
+            OUTPUT_FILE="$existing"
             ;;
         Renombrar)
-            local counter=1
-            while [[ -f "$output_dir/${filename}_${counter}.$format" ]]; do
-                ((counter++))
-            done
-            CONFLICT_OUTPUT="$output_dir/${filename}_${counter}.$format"
-            return 1
+            local c=1
+            while [[ -f "$dir/${fname}_${c}.$fmt" ]]; do (( c++ )); done
+            OUTPUT_FILE="$dir/${fname}_${c}.$fmt"
             ;;
         *)
-            # Omitir o valor vacío
-            CONFLICT_OUTPUT=""
-            return 2
+            SKIP_FILE=true
             ;;
     esac
-}
-
-################################################################################
-# FUNCIÓN: Convertir archivo de audio con progreso real
-################################################################################
-convert_file() {
-    local input_file="$1"
-    local output_file="$2"
-    local file_num="$3"
-    local total_files="$4"
-    
-    local base_name
-    local duration_seconds
-    local pipe_file
-    local extra_flags=()
-    local ffmpeg_pid
-    local quality_label
-    local dialog_text
-    
-    base_name=$(basename "$input_file")
-    
-    # Obtener duración del archivo para calcular porcentaje
-    duration_seconds=$(ffprobe -v error \
-        -show_entries format=duration \
-        -of default=noprint_wrappers=1:nokey=1 \
-        "$input_file" 2>/dev/null)
-    
-    # Validar duración
-    if [[ ! "$duration_seconds" =~ ^[0-9]+\.?[0-9]*$ ]] || (( $(echo "$duration_seconds <= 0" | bc -l) )); then
-        duration_seconds=0
-    else
-        duration_seconds="${duration_seconds%.*}"
-    fi
-    
-    # Crear archivo de tubería para progreso
-    pipe_file=$(mktemp -u "$TEMP_DIR/pipe_XXXXXX")
-    mkfifo "$pipe_file" 2>/dev/null || return 1
-    
-    # Construir flags opcionales
-    [[ -n "$SAMPLE_RATE" ]] && extra_flags+=(-ar "$SAMPLE_RATE")
-    [[ "$IS_LOSSLESS" == "true" && -n "$BIT_DEPTH" ]] && \
-        extra_flags+=(-sample_fmt "$BIT_DEPTH")
-    
-    # Ejecutar ffmpeg con barra de progreso
-    if [[ "$IS_LOSSLESS" == "true" ]]; then
-        ffmpeg -hide_banner -loglevel error -y -threads auto \
-            -i "$input_file" -vn "${extra_flags[@]}" \
-            -progress "$pipe_file" -nostats \
-            "$output_file" &>/dev/null &
-    else
-        ffmpeg -hide_banner -loglevel error -y -threads auto \
-            -i "$input_file" -vn -b:a "$BITRATE_OPT" "${extra_flags[@]}" \
-            -progress "$pipe_file" -nostats \
-            "$output_file" &>/dev/null &
-    fi
-    ffmpeg_pid=$!
-    
-    # Construir etiqueta de calidad
-    quality_label="$FORMAT"
-    [[ -n "$BITRATE_OPT" ]] && quality_label="$FORMAT @ $BITRATE_OPT"
-    [[ -n "$SAMPLE_RATE" ]] && quality_label+=" @ ${SAMPLE_RATE}Hz"
-    [[ "$IS_LOSSLESS" == "true" && -n "$BIT_DEPTH" ]] && \
-        quality_label+=" (${BIT_DEPTH})"
-    
-    # Construir texto del diálogo
-    dialog_text="<b>Archivo $file_num de $total_files</b>\n\n"
-    dialog_text+="  📄 <b>Origen:</b>  <i>$base_name</i>\n"
-    dialog_text+="  🎚️  <b>Calidad:</b>  <i>$quality_label</i>\n"
-    dialog_text+="  💾 <b>Destino:</b>  <i>$OUTPUT_DIR</i>"
-    
-    # Procesar barra de progreso
-    (
-        local percentage=0
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^out_time_ms=([0-9]+)$ ]]; then
-                local time_ms="${BASH_REMATCH[1]}"
-                
-                if (( duration_seconds > 0 )); then
-                    percentage=$(( time_ms / (duration_seconds * 10000) ))
-                    (( percentage >= 100 )) && percentage=99
-                else
-                    percentage=$(( (percentage + 1) % 98 ))
-                fi
-                echo "$percentage"
-            fi
-            
-            [[ "$line" == "progress=end" ]] && { echo "100"; break; }
-        done < "$pipe_file"
-    ) | yad --progress \
-        --title="🔄 Convirtiendo ($file_num / $total_files)..." \
-        --text="$dialog_text" \
-        --percentage=0 \
-        --auto-close \
-        --width=580 \
-        --no-buttons \
-        --button="⛔ Cancelar:1" 2>/dev/null
-    
-    local dialog_exit=$?
-    
-    # Limpiar archivo de tubería
-    rm -f "$pipe_file" 2>/dev/null
-    
-    # Manejar cancelación
-    if (( dialog_exit != 0 )); then
-        kill "$ffmpeg_pid" 2>/dev/null
-        wait "$ffmpeg_pid" 2>/dev/null
-        rm -f "$output_file" 2>/dev/null
-        
-        yad --warning \
-            --title="⛔ Conversión cancelada" \
-            --text="<b>La conversión fue cancelada por el usuario.</b>\n\nArchivo parcial eliminado." \
-            --width=420 \
-            --button="OK:0" 2>/dev/null
-        
-        return 2
-    fi
-    
-    # Esperar a que termine ffmpeg
-    wait "$ffmpeg_pid"
-    return $?
-}
-
-################################################################################
-# FUNCIÓN: Mostrar diálogo final con resumen de conversión
-################################################################################
-show_final_dialog() {
-    local converted_count="$1"
-    local failed_count="$2"
-    local total_count="$3"
-    shift 3
-    local converted_files=("$@")
-    
-    local quality_label="$FORMAT"
-    [[ -n "$BITRATE_OPT" ]] && quality_label="$FORMAT @ $BITRATE_OPT"
-    [[ -n "$SAMPLE_RATE" ]] && quality_label+=" @ ${SAMPLE_RATE}Hz"
-    [[ "$IS_LOSSLESS" == "true" && -n "$BIT_DEPTH" ]] && \
-        quality_label+=" (${BIT_DEPTH})"
-    
-    # Construir texto del resultado
-    local result_text="<b><span foreground='#4CAF50' size='large'>✅ ¡Proceso completado!</span></b>\n\n"
-    result_text+="<b>Estadísticas de conversión:</b>\n"
-    result_text+="  ✔️  <b>Convertidos:</b>  <b>$converted_count / $total_count</b>\n"
-    
-    if (( failed_count > 0 )); then
-        result_text+="  ❌ <b>Omitidos/Fallidos:</b>  <b><span foreground='#F44336'>$failed_count</span></b>\n"
-    fi
-    
-    result_text+="\n<b>Configuración final:</b>\n"
-    result_text+="  🎵 <b>Formato:</b>  <i>$quality_label</i>\n"
-    result_text+="  📂 <b>Ubicación:</b>  <i>$OUTPUT_DIR</i>\n"
-    
-    # Agregar listado de archivos generados
-    if (( ${#converted_files[@]} > 0 )); then
-        result_text+="\n<b>Archivos generados:</b>\n"
-        local limit=$(( ${#converted_files[@]} < 8 ? ${#converted_files[@]} : 8 ))
-        
-        for (( i=0; i<limit; i++ )); do
-            local file_path="${converted_files[$i]}"
-            local file_size
-            file_size=$(du -sh "$file_path" 2>/dev/null | cut -f1)
-            result_text+="  📄 <i>$(basename "$file_path")</i>  <span foreground='#888888'>($file_size)</span>\n"
-        done
-        
-        if (( ${#converted_files[@]} > 8 )); then
-            result_text+="  … y $((${#converted_files[@]} - 8)) archivo(s) más\n"
-        fi
-    fi
-    
-    # Mostrar diálogo final
-    yad --info \
-        --title="✅ Conversión completada" \
-        --text="$result_text" \
-        --width=600 \
-        --height=420 \
-        --button="🕑 Historial:3" \
-        --button="📂 Abrir carpeta:2" \
-        --button="✔️  Finalizar:0" 2>/dev/null
-    
-    local button_pressed=$?
-    
-    # Manejar acciones del botón
-    case $button_pressed in
-        2)
-            # Abrir carpeta de destino
-            xdg-open "$OUTPUT_DIR" 2>/dev/null &
-            ;;
-        3)
-            # Ver historial
-            show_history_dialog
-            ;;
-    esac
-}
-
-################################################################################
-# FUNCIÓN: Mostrar historial de conversiones
-################################################################################
-show_history_dialog() {
-    if [[ ! -f "$HISTORY_FILE" ]]; then
-        yad --info \
-            --title="🕑 Historial de conversiones" \
-            --text="<i>No hay historial disponible aún.</i>" \
-            --width=400 \
-            --button="OK:0" 2>/dev/null
-        return
-    fi
-    
-    yad --text-info \
-        --title="🕑 Historial de conversiones" \
-        --filename="$HISTORY_FILE" \
-        --width=800 \
-        --height=480 \
-        --tail \
-        --button="🗑️  Limpiar historial:2" \
-        --button="OK:0" 2>/dev/null
-    
-    if (( $? == 2 )); then
-        > "$HISTORY_FILE"
-        yad --info \
-            --title="Historial limpiado" \
-            --text="El historial ha sido eliminado." \
-            --width=300 \
-            --button="OK:0" 2>/dev/null
-    fi
 }
 
 ################################################################################
@@ -387,33 +129,29 @@ show_history_dialog() {
 ################################################################################
 select_input_files() {
     local input_raw
-    
+
     input_raw=$(yad --file \
         --title="🎵 Audio Converter — Seleccionar Archivos" \
         --text="<b>Selecciona uno o más archivos de audio:</b>\n<i>Mantén Ctrl o Shift para múltiple selección</i>" \
         --multiple \
         --file-filter="Archivos de Audio|*.mp3 *.aac *.flac *.ogg *.wav *.opus *.wma *.m4a *.aiff *.mp2 *.webm *.mkv" \
         --file-filter="Todos los archivos|*" \
-        --width=780 \
-        --height=560 \
+        --width=780 --height=560 \
         --button="gtk-cancel:1" \
         --button="Siguiente ▶:0" 2>/dev/null)
-    
+
     (( $? != 0 )) && return 1
     [[ -z "$input_raw" ]] && return 1
-    
-    # Parsear archivos separados por |
-    local -a files=()
-    local IFS='|'
-    for file in $input_raw; do
-        # Limpiar espacios
-        file="${file#"${file%%[![:space:]]*}"}"
-        file="${file%"${file##*[![:space:]]}"}"
-        
-        [[ -f "$file" ]] && files+=("$file")
+
+    IFS='|' read -ra raw_list <<< "$input_raw"
+    INPUT_FILES=()
+    for f in "${raw_list[@]}"; do
+        f="${f#"${f%%[![:space:]]*}"}"
+        f="${f%"${f##*[![:space:]]}"}"
+        [[ -f "$f" ]] && INPUT_FILES+=("$f")
     done
-    
-    if (( ${#files[@]} == 0 )); then
+
+    if (( ${#INPUT_FILES[@]} == 0 )); then
         yad --error \
             --title="❌ Error" \
             --text="No se encontraron archivos válidos." \
@@ -421,9 +159,7 @@ select_input_files() {
             --button="OK:0" 2>/dev/null
         return 1
     fi
-    
-    # Guardar archivos en variable global
-    INPUT_FILES=("${files[@]}")
+
     return 0
 }
 
@@ -431,136 +167,117 @@ select_input_files() {
 # PASO 2: CONFIRMAR ARCHIVOS CON INFORMACIÓN
 ################################################################################
 confirm_input_files() {
+    local file_count=${#INPUT_FILES[@]}
     local -a info_rows=()
-    local -a all_files=()
-    
-    # Recopilar información de cada archivo
-    for file in "${INPUT_FILES[@]}"; do
-        local base_name
-        local duration
-        local size_bytes
-        local codec
-        
-        base_name=$(basename "$file")
-        
-        # Extraer información con ffprobe
-        local ffprobe_out
-        ffprobe_out=$(ffprobe -v error \
+
+    for f in "${INPUT_FILES[@]}"; do
+        local bname
+        bname=$(basename "$f")
+
+        local raw
+        raw=$(ffprobe -v error \
             -show_entries format=duration,size \
             -show_entries stream=codec_name \
-            -of default=noprint_wrappers=1 "$file" 2>/dev/null)
-        
-        # Procesar duración
-        duration=$(echo "$ffprobe_out" | grep "^duration=" | head -1 | cut -d= -f2)
-        if [[ "$duration" =~ ^[0-9] ]]; then
-            local duration_int="${duration%.*}"
-            duration="$((duration_int / 60))m $((duration_int % 60))s"
-        else
-            duration="N/A"
-        fi
-        
-        # Procesar tamaño
-        size_bytes=$(echo "$ffprobe_out" | grep "^size=" | head -1 | cut -d= -f2)
+            -of default=noprint_wrappers=1 "$f" 2>/dev/null)
+
+        local dur_raw size_bytes codec
+        dur_raw=$(echo "$raw"    | grep "^duration="   | head -1 | cut -d= -f2)
+        size_bytes=$(echo "$raw" | grep "^size="        | head -1 | cut -d= -f2)
+        codec=$(echo "$raw"      | grep "^codec_name="  | head -1 | cut -d= -f2)
+
+        local di=${dur_raw%.*}
+        local dur_str
+        [[ "$di" =~ ^[0-9]+$ ]] \
+            && dur_str="$(( di / 60 ))m $(( di % 60 ))s" \
+            || dur_str="N/A"
+
         if [[ "$size_bytes" =~ ^[0-9]+$ ]]; then
             size_bytes=$(numfmt --to=iec --suffix=B "$size_bytes" 2>/dev/null || echo "N/A")
         else
             size_bytes="N/A"
         fi
-        
-        # Procesar códec
-        codec=$(echo "$ffprobe_out" | grep "^codec_name=" | head -1 | cut -d= -f2)
-        codec="${codec:-N/A}"
-        
-        # Agregar fila a la lista
-        info_rows+=("TRUE" "$base_name" "$codec" "$duration" "$size_bytes")
+
+        info_rows+=("TRUE" "$bname" "${codec:-N/A}" "$dur_str" "$size_bytes")
     done
-    
-    # Mostrar checklist
-    local checklist_output
-    checklist_output=$(yad --list \
-        --title="🎵 Audio Converter — Confirmar Archivos" \
-        --text="<b>Confirma los archivos a convertir:</b>\n<i>Desmarca los que quieras excluir de la conversión</i>" \
+
+    local selected_raw
+    selected_raw=$(yad --list \
+        --title="🎵 Audio Converter — Confirmar Archivos ($file_count archivos)" \
+        --text="<b>Confirma los archivos a convertir:</b>\n<i>Desmarca los que no quieras incluir.</i>" \
         --checklist \
-        --column="✔️" \
-        --column="Archivo" \
+        --column="✔" \
+        --column="Nombre" \
         --column="Códec" \
         --column="Duración" \
         --column="Tamaño" \
         "${info_rows[@]}" \
         --print-column=2 \
-        --separator="|" \
-        --width=760 \
-        --height=480 \
+        --width=820 --height=460 \
         --button="gtk-cancel:1" \
-        --button="☑️  Todas:2" \
+        --button="☑  Todas:2" \
         --button="Continuar ▶:0" 2>/dev/null)
-    
-    local button=$?
-    
-    case $button in
-        1)
-            return 1
-            ;;
-        2)
-            # Todas seleccionadas
-            return 0
-            ;;
-        0)
-            # Procesar selección
-            local -a selected_files=()
-            local IFS=$'\n'
-            
-            for line in $checklist_output; do
-                local file_name
-                file_name=$(echo "$line" | tr -d '|' | xargs)
-                [[ -z "$file_name" ]] && continue
-                
-                # Encontrar archivo original por nombre
-                for orig_file in "${INPUT_FILES[@]}"; do
-                    if [[ "$(basename "$orig_file")" == "$file_name" ]]; then
-                        selected_files+=("$orig_file")
-                        break
-                    fi
-                done
-            done
-            
-            if (( ${#selected_files[@]} == 0 )); then
-                yad --info \
-                    --title="ℹ️  Sin archivos" \
-                    --text="No se seleccionó ningún archivo para convertir." \
-                    --width=380 \
-                    --button="OK:0" 2>/dev/null
-                return 1
+
+    local btn=$?
+    [[ $btn -ne 0 && $btn -ne 2 ]] && return 1
+
+    if [[ $btn -eq 2 ]]; then
+        return 0   # Todas seleccionadas; INPUT_FILES no cambia
+    fi
+
+    local -a final_files=()
+    while IFS= read -r sel_name; do
+        sel_name="${sel_name//|/}"
+        sel_name="${sel_name#"${sel_name%%[![:space:]]*}"}"
+        sel_name="${sel_name%"${sel_name##*[![:space:]]}"}"
+        [[ -z "$sel_name" ]] && continue
+        for orig in "${INPUT_FILES[@]}"; do
+            if [[ "$(basename "$orig")" == "$sel_name" ]]; then
+                final_files+=("$orig")
+                break
             fi
-            
-            INPUT_FILES=("${selected_files[@]}")
-            return 0
-            ;;
-    esac
+        done
+    done <<< "$selected_raw"
+
+    if (( ${#final_files[@]} == 0 )); then
+        yad --warning \
+            --title="Sin archivos" \
+            --text="No seleccionaste ningún archivo." \
+            --width=360 \
+            --button="OK:0" 2>/dev/null
+        return 1
+    fi
+
+    INPUT_FILES=("${final_files[@]}")
+    return 0
 }
 
 ################################################################################
-# PASOS 3-7: CONFIGURACIÓN CON NAVEGACIÓN ATRÁS/SIGUIENTE
+# PASOS 3-7: SELECCIÓN DE OPCIONES DE CONVERSIÓN
+# Exporta: FORMAT, BITRATE_OPT, IS_LOSSLESS, SAMPLE_RATE, BIT_DEPTH, OUTPUT_DIR
+# Retorna: 0=Confirmar  1=Cancelar  2=Atrás desde Formato (lo gestiona el llamador)
 ################################################################################
 select_audio_options() {
-    local step="${1:-3}"
+    local start_step="${1:-3}"
     FORMAT=""
     BITRATE_OPT=""
     IS_LOSSLESS=false
     SAMPLE_RATE=""
     BIT_DEPTH=""
     OUTPUT_DIR=""
-    
+
+    local step=$start_step
+
     while true; do
         case $step in
-        
-        ################################
-        # PASO 3: SELECCIONAR FORMATO
-        ################################
+
+        ########################################################################
+        # PASO 3: FORMATO DE SALIDA
+        ########################################################################
         3)
-            FORMAT=$(yad --list \
-                --title="🎵 Audio Converter — Paso 3: Formato de Salida" \
-                --text="<b>Selecciona el formato de conversión:</b>" \
+            local format_raw
+            format_raw=$(yad --list \
+                --title="🎵 Audio Converter — Formato de Salida" \
+                --text="<b>Selecciona el formato al que deseas convertir:</b>" \
                 --column="Ext" \
                 --column="Nombre Completo" \
                 --column="Tipo" \
@@ -574,81 +291,71 @@ select_audio_options() {
                 "m4a"  "MPEG-4 Audio"                   "Con pérdida" \
                 "aiff" "Audio Interchange File Format"  "Sin pérdida ✦" \
                 "mp2"  "MPEG Audio Layer II"            "Con pérdida" \
-                --width=540 \
-                --height=480 \
+                --width=520 --height=450 \
                 --print-column=1 \
                 --button="gtk-cancel:1" \
                 --button="◀ Atrás:2" \
                 --button="Siguiente ▶:0" 2>/dev/null)
-            
-            case $? in
-                1) return 1 ;;
-                2) return 2 ;;
-            esac
-            
-            [[ -z "$FORMAT" ]] && continue
-            
-            # Limpiar FORMAT
-            FORMAT=$(echo "$FORMAT" | tr -d '|' | xargs)
-            
-            # Determinar si es lossless
+
+            local rc=$?
+            [[ $rc -eq 2 ]] && return 2   # El llamador decide a dónde retroceder
+            [[ $rc -ne 0 ]] && return 1   # Cancelar o cierre de ventana
+            [[ -z "$format_raw" ]] && continue
+
+            FORMAT=$(echo "$format_raw" | tr -d '|' | xargs)
+
             IS_LOSSLESS=false
-            case "$FORMAT" in
-                flac|wav|aiff) IS_LOSSLESS=true ;;
-            esac
-            
+            case "$FORMAT" in flac|wav|aiff) IS_LOSSLESS=true ;; esac
+
             BITRATE_OPT=""
             step=4
             ;;
-        
-        ################################
-        # PASO 4: SELECCIONAR BITRATE
-        ################################
+
+        ########################################################################
+        # PASO 4: BITRATE (solo formatos con pérdida)
+        ########################################################################
         4)
-            # Saltar para formatos sin pérdida
+            # Los formatos sin pérdida no tienen bitrate configurable
             if [[ "$IS_LOSSLESS" == "true" ]]; then
                 step=5
                 continue
             fi
-            
-            BITRATE_OPT=$(yad --list \
-                --title="🎵 Audio Converter — Paso 4: Calidad de Audio (Bitrate)" \
-                --text="<b>Selecciona el bitrate de salida:</b>\n<i>Mayor bitrate = Mejor calidad (pero archivo más grande)</i>" \
+
+            local quality_raw
+            quality_raw=$(yad --list \
+                --title="🎵 Audio Converter — Calidad de Audio" \
+                --text="<b>Selecciona la calidad (bitrate) de salida:</b>" \
                 --column="Bitrate" \
                 --column="Calidad" \
                 --column="Uso recomendado" \
                 "64k"  "Baja"       "Voz, podcasts, audiolibros" \
                 "96k"  "Media-baja" "Radio online, streaming básico" \
                 "128k" "Media"      "Música casual, streaming general" \
-                "192k" "Alta"       "Música de buena calidad ✦" \
+                "192k" "Alta"       "Música de buena calidad  ✦" \
                 "256k" "Muy alta"   "Música de alta fidelidad" \
                 "320k" "Máxima"     "Audiófilos, archivos maestros" \
-                --width=560 \
-                --height=400 \
+                --width=540 --height=380 \
                 --print-column=1 \
                 --button="gtk-cancel:1" \
                 --button="◀ Atrás:2" \
                 --button="Siguiente ▶:0" 2>/dev/null)
-            
-            case $? in
-                1) return 1 ;;
-                2) return 2 ;;
-            esac
-            
-            [[ -z "$BITRATE_OPT" ]] && continue
-            
-            # Limpiar BITRATE_OPT
-            BITRATE_OPT=$(echo "$BITRATE_OPT" | tr -d '|' | xargs)
+
+            local rc=$?
+            [[ $rc -eq 2 ]] && { step=3; continue; }
+            [[ $rc -ne 0 ]] && return 1   # Cancelar o cierre de ventana
+            [[ -z "$quality_raw" ]] && continue
+
+            BITRATE_OPT=$(echo "$quality_raw" | tr -d '|' | xargs)
             step=5
             ;;
-        
-        ################################
-        # PASO 5: SELECCIONAR SAMPLE RATE
-        ################################
+
+        ########################################################################
+        # PASO 5: SAMPLE RATE
+        ########################################################################
         5)
-            local sr_hint=""
             local -a sr_options=()
-            
+            local sr_hint="<i>44100 Hz es estándar para música. 48000 Hz para video.</i>"
+
             case "$FORMAT" in
                 opus)
                     sr_hint="<b>Opus resamplea internamente a un máximo de 48 kHz.</b>"
@@ -671,7 +378,7 @@ select_audio_options() {
                 aac|m4a)
                     sr_hint="<b>AAC soporta hasta 96 kHz (Hi-Res con soporte limitado).</b>"
                     sr_options=(
-                        "orig"  "Sin cambios ✦" "Mantener original"
+                        "orig"   "Sin cambios ✦" "Mantener original"
                         "96000"  "96 kHz"        "Estudio / Hi-Res"
                         "88200"  "88.2 kHz"      "Múltiplo de CD"
                         "48000"  "48 kHz"        "Estándar profesional"
@@ -694,248 +401,397 @@ select_audio_options() {
                         "44100" "44.1 kHz"      "Estándar CD"
                     ) ;;
             esac
-            
-            SAMPLE_RATE=$(yad --list \
-                --title="🎵 Audio Converter — Paso 5: Sample Rate" \
+
+            local sr_raw
+            sr_raw=$(yad --list \
+                --title="🎵 Audio Converter — Sample Rate" \
                 --text="<b>Selecciona el sample rate para $FORMAT:</b>\n$sr_hint" \
                 --column="Hz" \
                 --column="Nombre" \
                 --column="Uso típico" \
                 "${sr_options[@]}" \
-                --width=560 \
-                --height=420 \
+                --width=540 --height=420 \
                 --print-column=1 \
                 --button="gtk-cancel:1" \
                 --button="◀ Atrás:2" \
                 --button="Siguiente ▶:0" 2>/dev/null)
-            
-            case $? in
-                1) return 1 ;;
-                2) return 2 ;;
-            esac
-            
-            [[ -z "$SAMPLE_RATE" ]] && continue
-            
-            # Limpiar y procesar SAMPLE_RATE
+
+            local rc=$?
+            if [[ $rc -eq 2 ]]; then
+                # Retroceder a bitrate (con pérdida) o a formato (sin pérdida)
+                [[ "$IS_LOSSLESS" == "true" ]] && step=3 || step=4
+                continue
+            fi
+            [[ $rc -ne 0 ]] && return 1   # Cancelar o cierre de ventana
+            [[ -z "$sr_raw" ]] && continue
+
             local sr_val
-            sr_val=$(echo "$SAMPLE_RATE" | tr -d '|' | xargs)
+            sr_val=$(echo "$sr_raw" | tr -d '|' | xargs)
             SAMPLE_RATE=""
             [[ "$sr_val" != "orig" ]] && SAMPLE_RATE="$sr_val"
-            
             step=6
             ;;
-        
-        ################################
-        # PASO 6: SELECCIONAR BIT DEPTH
-        ################################
+
+        ########################################################################
+        # PASO 6: BIT DEPTH (solo formatos sin pérdida)
+        ########################################################################
         6)
-            # Saltar para formatos con pérdida
+            # Los formatos con pérdida no exponen control de bit depth
             if [[ "$IS_LOSSLESS" == "false" ]]; then
                 step=7
                 continue
             fi
-            
-            BIT_DEPTH=$(yad --list \
-                --title="🎵 Audio Converter — Paso 6: Bit Depth (Profundidad de Bits)" \
-                --text="<b>Selecciona la profundidad de bits:</b>\n<i>Solo para formatos sin pérdida (FLAC, WAV, AIFF).</i>" \
+
+            local bd_raw
+            bd_raw=$(yad --list \
+                --title="🎵 Audio Converter — Bit Depth" \
+                --text="<b>Selecciona la profundidad de bits:</b>\n<i>Solo aplica a formatos sin pérdida (FLAC, WAV, AIFF).</i>" \
                 --column="Formato ffmpeg" \
                 --column="Bit Depth" \
                 --column="Descripción" \
-                "orig" "Sin cambios ✦"   "Mantener profundidad original" \
-                "s16"  "16-bit (CD)"     "Estándar CD — compatible universal" \
-                "s32"  "24/32-bit"       "Alta resolución — producción" \
-                "s64"  "32-bit float"    "Máxima precisión — edición profesional" \
-                --width=560 \
-                --height=360 \
+                "orig" "Sin cambios ✦" "Mantener la profundidad de bits original" \
+                "s16"  "16 bits"       "Estándar CD — compatible con todos los reproductores" \
+                "s32"  "24 bits (s32)" "Alta resolución — producción y masterización" \
+                "s64"  "32 bits float" "Máxima precisión — edición profesional" \
+                --width=540 --height=340 \
                 --print-column=1 \
                 --button="gtk-cancel:1" \
                 --button="◀ Atrás:2" \
                 --button="Siguiente ▶:0" 2>/dev/null)
-            
-            case $? in
-                1) return 1 ;;
-                2) return 2 ;;
-            esac
-            
-            [[ -z "$BIT_DEPTH" ]] && continue
-            
-            # Limpiar y procesar BIT_DEPTH
+
+            local rc=$?
+            [[ $rc -eq 2 ]] && { step=5; continue; }
+            [[ $rc -ne 0 ]] && return 1   # Cancelar o cierre de ventana
+            [[ -z "$bd_raw" ]] && continue
+
             local bd_val
-            bd_val=$(echo "$BIT_DEPTH" | tr -d '|' | xargs)
+            bd_val=$(echo "$bd_raw" | tr -d '|' | xargs)
             BIT_DEPTH=""
             [[ "$bd_val" != "orig" ]] && BIT_DEPTH="$bd_val"
-            
             step=7
             ;;
-        
-        ################################
-        # PASO 7: SELECCIONAR CARPETA DESTINO
-        ################################
+
+        ########################################################################
+        # PASO 7: CARPETA DE DESTINO
+        ########################################################################
         7)
             OUTPUT_DIR=$(yad --file \
-                --title="🎵 Audio Converter — Paso 7: Carpeta de Destino" \
-                --text="<b>Selecciona dónde guardar los archivos convertidos:</b>" \
+                --title="🎵 Audio Converter — Carpeta de Destino" \
+                --text="<b>Selecciona la carpeta donde se guardarán los archivos convertidos:</b>" \
                 --directory \
                 --filename="$LAST_DIR/" \
-                --width=780 \
-                --height=560 \
+                --width=750 --height=520 \
                 --button="gtk-cancel:1" \
                 --button="◀ Atrás:2" \
                 --button="Confirmar ✔:0" 2>/dev/null)
-            
-            case $? in
-                1) return 1 ;;
-                2) return 2 ;;
-            esac
-            
+
+            local rc=$?
+            if [[ $rc -eq 2 ]]; then
+                # Retroceder a bit depth (sin pérdida) o a sample rate (con pérdida)
+                [[ "$IS_LOSSLESS" == "true" ]] && step=6 || step=5
+                continue
+            fi
+            [[ $rc -ne 0 ]] && return 1   # Cancelar o cierre de ventana
             [[ -z "$OUTPUT_DIR" ]] && continue
-            
-            # Guardar directorio en configuración
+
+            # Persistir la última carpeta usada
             echo "LAST_DIR=\"$OUTPUT_DIR\"" > "$CONFIG_FILE"
             break
             ;;
         esac
     done
-    
+
     return 0
 }
 
 ################################################################################
-# FUNCIÓN PRINCIPAL DE CONVERSIÓN
+# FUNCIÓN: Convertir archivo de audio con barra de progreso
+# Uso: convert_file INPUT OUTPUT [LABEL_EXTRA]
+# Retorna: 0=OK  2=Cancelado por el usuario  otro=Error de FFmpeg
+################################################################################
+convert_file() {
+    local input_file="$1"
+    local output_file="$2"
+    local label_extra="${3:-}"
+
+    local base_name
+    base_name=$(basename "$input_file")
+
+    # Obtener duración del archivo en segundos para calcular el porcentaje
+    local raw_dur
+    raw_dur=$(ffprobe -v error \
+        -show_entries format=duration \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$input_file" 2>/dev/null)
+    local dur_int=${raw_dur%.*}
+    [[ -z "$dur_int" || ! "$dur_int" =~ ^[0-9]+$ || "$dur_int" -le 0 ]] && dur_int=0
+
+    # FIFO para recibir el progreso en tiempo real desde FFmpeg
+    local pipe
+    pipe=$(mktemp -u "$TEMP_DIR/pipe_XXXXXX")
+    mkfifo "$pipe"
+
+    # Construir flags opcionales de sample rate y bit depth
+    local extra_flags=()
+    [[ -n "$SAMPLE_RATE" ]] && extra_flags+=(-ar "$SAMPLE_RATE")
+    [[ -n "$BIT_DEPTH" && "$IS_LOSSLESS" == "true" ]] && extra_flags+=(-sample_fmt "$BIT_DEPTH")
+
+    # Lanzar FFmpeg en segundo plano según el tipo de formato
+    if [[ "$IS_LOSSLESS" == "true" ]]; then
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$input_file" -vn "${extra_flags[@]}" \
+               -progress "$pipe" -nostats \
+               "$output_file" &
+    else
+        ffmpeg -hide_banner -loglevel error -y -threads auto \
+               -i "$input_file" -vn -b:a "$BITRATE_OPT" "${extra_flags[@]}" \
+               -progress "$pipe" -nostats \
+               "$output_file" &
+    fi
+    local ffmpeg_pid=$!
+
+    # Construir etiqueta de calidad para mostrar en el diálogo
+    local qlabel
+    if [[ "${WAV_ONLY:-false}" == "true" ]]; then
+        qlabel="WAV sin convertir"
+    else
+        qlabel="$FORMAT"
+        [[ -n "$BITRATE_OPT" ]] && qlabel="$FORMAT @ $BITRATE_OPT"
+        [[ -n "$SAMPLE_RATE" ]] && qlabel+="  ${SAMPLE_RATE} Hz"
+        [[ -n "$BIT_DEPTH"   ]] && qlabel+="  ${BIT_DEPTH}"
+    fi
+
+    local dialog_text="<b>Convirtiendo:</b>  <i>$base_name</i>\n  <b>Calidad:</b>  $qlabel"
+    [[ -n "$label_extra" ]] && dialog_text+="\n$label_extra"
+
+    # Leer el pipe de progreso y alimentar la barra de YAD
+    (
+        local pct=0
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^out_time_ms=([0-9]+)$ ]]; then
+                local t="${BASH_REMATCH[1]}"
+                if [[ $dur_int -gt 0 ]]; then
+                    pct=$(( t / (dur_int * 10000) ))
+                    (( pct >= 100 )) && pct=99
+                else
+                    # Duración desconocida: avanzar cíclicamente hasta 97 %
+                    pct=$(( (pct + 1) % 98 ))
+                fi
+                echo "$pct"
+            fi
+            [[ "$line" == "progress=end" ]] && echo "100" && break
+        done < "$pipe"
+    ) | yad --progress \
+        --title="🔄 Convirtiendo..." \
+        --text="$dialog_text" \
+        --percentage=0 \
+        --auto-close \
+        --width=560 \
+        --button="⛔  Cancelar:1" 2>/dev/null
+
+    local yad_exit=$?
+    rm -f "$pipe"
+
+    # El usuario presionó Cancelar
+    if [[ $yad_exit -ne 0 ]]; then
+        kill "$ffmpeg_pid" 2>/dev/null
+        wait "$ffmpeg_pid" 2>/dev/null
+        rm -f "$output_file"
+        yad --warning \
+            --title="Cancelado" \
+            --text="<b>⚠ Conversión cancelada.</b>\nEl archivo parcial fue eliminado." \
+            --width=400 \
+            --button="OK:0" 2>/dev/null
+        return 2
+    fi
+
+    wait "$ffmpeg_pid"
+    return $?
+}
+
+################################################################################
+# FUNCIÓN: Mostrar historial de conversiones
+################################################################################
+show_history_dialog() {
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        yad --info \
+            --title="🕑 Historial de conversiones" \
+            --text="<i>No hay historial disponible aún.</i>" \
+            --width=400 \
+            --button="OK:0" 2>/dev/null
+        return
+    fi
+
+    yad --text-info \
+        --title="🕑 Historial de conversiones" \
+        --filename="$HISTORY_FILE" \
+        --width=800 --height=460 \
+        --tail \
+        --button="🗑️  Limpiar historial:2" \
+        --button="OK:0" 2>/dev/null
+
+    if (( $? == 2 )); then
+        > "$HISTORY_FILE"
+        yad --info \
+            --title="Historial limpiado" \
+            --text="El historial ha sido eliminado." \
+            --width=300 \
+            --button="OK:0" 2>/dev/null
+    fi
+}
+
+################################################################################
+# FUNCIÓN: Mostrar resumen final de conversión
+################################################################################
+show_final_dialog() {
+    local converted=$1
+    local failed=$2
+    local total=$3
+    shift 3
+    local files=("$@")
+
+    # Construir etiqueta de calidad del proceso
+    local qlabel
+    if [[ "${WAV_ONLY:-false}" == "true" ]]; then
+        qlabel="WAV sin convertir"
+    else
+        qlabel="$FORMAT"
+        [[ -n "$BITRATE_OPT" ]] && qlabel="$FORMAT @ $BITRATE_OPT"
+        [[ -n "$SAMPLE_RATE" ]] && qlabel+="  ${SAMPLE_RATE} Hz"
+        [[ -n "$BIT_DEPTH"   ]] && qlabel+="  ${BIT_DEPTH}"
+    fi
+
+    local done_text
+    done_text="<b><span foreground='#4CAF50' size='large'>✅  ¡Proceso completado!</span></b>\n\n"
+    done_text+="  <b>Convertidos:</b>  $converted de $total\n"
+    [[ $failed -gt 0 ]] && \
+        done_text+="  <b><span foreground='#F44336'>Fallidos:</span></b>  $failed\n"
+    done_text+="  <b>Formato:</b>  $qlabel\n"
+    done_text+="  <b>Ubicación:</b>  $OUTPUT_DIR\n\n"
+
+    # Listar hasta 8 archivos generados con su tamaño
+    if [[ ${#files[@]} -gt 0 ]]; then
+        done_text+="<b>Archivos generados:</b>\n"
+        local limit=$(( ${#files[@]} < 8 ? ${#files[@]} : 8 ))
+        for (( i = 0; i < limit; i++ )); do
+            local cf="${files[$i]}"
+            local fsize
+            fsize=$(du -sh "$cf" 2>/dev/null | cut -f1)
+            done_text+="  📄 $(basename "$cf")  <i>($fsize)</i>\n"
+        done
+        (( ${#files[@]} > 8 )) && \
+            done_text+="  … y $(( ${#files[@]} - 8 )) archivo(s) más\n"
+    fi
+
+    yad --info \
+        --title="✅ Conversión completada" \
+        --text="$done_text" \
+        --width=580 --height=360 \
+        --button="🕑  Historial:3" \
+        --button="📂  Abrir carpeta:2" \
+        --button="✔️  Finalizar:0" 2>/dev/null
+
+    local btn=$?
+    [[ $btn -eq 2 ]] && xdg-open "$OUTPUT_DIR" &
+    [[ $btn -eq 3 ]] && show_history_dialog
+}
+
+################################################################################
+# FUNCIÓN PRINCIPAL DE CONVERSIÓN DE ARCHIVOS LOCALES
 ################################################################################
 process_conversions() {
-    local converted_count=0
-    local failed_count=0
+    local converted=0
+    local failed=0
     local -a converted_files=()
     local file_number=0
     local total_files=${#INPUT_FILES[@]}
-    
+
     for input_file in "${INPUT_FILES[@]}"; do
-        ((file_number++))
-        
+        (( file_number++ ))
+
         local base_name="${input_file##*/}"
-        local filename="${base_name%.*}"
+        local fname="${base_name%.*}"
         local safe_name
-        safe_name=$(clean_filename "$filename")
+        safe_name=$(clean_filename "$fname")
         local output_file="$OUTPUT_DIR/$safe_name.$FORMAT"
-        
-        # Resolver conflicto si archivo ya existe
+
+        # Resolver conflicto si el archivo de destino ya existe
         if [[ -f "$output_file" ]]; then
             resolve_conflict "$output_file" "$safe_name" "$FORMAT" "$OUTPUT_DIR"
-            local conflict_result=$?
-            
-            case $conflict_result in
-                0)
-                    # Reemplazar - usar CONFLICT_OUTPUT
-                    output_file="$CONFLICT_OUTPUT"
-                    ;;
-                1)
-                    # Renombrar - usar CONFLICT_OUTPUT con contador
-                    output_file="$CONFLICT_OUTPUT"
-                    ;;
-                *)
-                    # Omitir o Cancel
-                    ((failed_count++))
-                    continue
-                    ;;
-            esac
+            [[ "$SKIP_FILE" == "true" ]] && { (( failed++ )); continue; }
+            output_file="$OUTPUT_FILE"
         fi
-        
-        # Convertir archivo
-        convert_file "$input_file" "$output_file" "$file_number" "$total_files"
-        local conversion_result=$?
-        
-        # Manejar cancelación
-        if (( conversion_result == 2 )); then
+
+        convert_file "$input_file" "$output_file" \
+            "  <b>Archivo</b>  $file_number de $total_files"
+        local conv_result=$?
+
+        if (( conv_result == 2 )); then
             return 2
         fi
-        
-        # Registrar resultado
-        if (( conversion_result == 0 )); then
-            ((converted_count++))
+
+        if (( conv_result == 0 )); then
+            (( converted++ ))
             converted_files+=("$output_file")
-            
-            # Agregar a historial
-            local quality_log="$FORMAT"
-            [[ -n "$BITRATE_OPT" ]] && quality_log+=" @ $BITRATE_OPT"
-            [[ -n "$SAMPLE_RATE" ]] && quality_log+=" (${SAMPLE_RATE}Hz)"
-            [[ -n "$BIT_DEPTH" ]] && quality_log+=" [${BIT_DEPTH}]"
-            
-            echo "$(date '+%Y-%m-%d %H:%M:%S') | $base_name → $(basename "$output_file") | $quality_log | $OUTPUT_DIR" \
+
+            local hist_label="${BITRATE_OPT:-lossless}"
+            [[ -n "$SAMPLE_RATE" ]] && hist_label+=" ${SAMPLE_RATE} Hz"
+            [[ -n "$BIT_DEPTH"   ]] && hist_label+=" ${BIT_DEPTH}"
+            echo "$(date '+%Y-%m-%d %H:%M')  |  $base_name  →  $(basename "$output_file")  |  $hist_label  |  $OUTPUT_DIR" \
                 >> "$HISTORY_FILE"
         else
-            ((failed_count++))
-            rm -f "$output_file" 2>/dev/null
+            (( failed++ ))
+            rm -f "$output_file"
         fi
     done
-    
-    # Mostrar diálogo final
-    show_final_dialog "$converted_count" "$failed_count" "$total_files" "${converted_files[@]}"
+
+    show_final_dialog "$converted" "$failed" "$total_files" "${converted_files[@]}"
 }
 
 ################################################################################
-# FLUJO PRINCIPAL DEL PROGRAMA
+# FLUJO PRINCIPAL
 ################################################################################
 main() {
-    # Verificar dependencias
     verify_dependencies
-    
-    # Cargar configuración
     LAST_DIR=$(load_config)
-    
-    # ════════════════════════════════════════════════════════════════
-    # PASO 1: SELECCIONAR ARCHIVOS (Solo una vez)
-    # ════════════════════════════════════════════════════════════════
+
+    # ── Paso 1: Selección de archivos (solo una vez) ──────────────────────────
     if ! select_input_files; then
         exit 0
     fi
-    
-    # Loop de configuración - permite volver a Paso 2 (confirmación)
+
+    # ── Loop principal: permite volver al paso 2 ──────────────────────────────
     while true; do
-        # ════════════════════════════════════════════════════════════════
-        # PASO 2: CONFIRMAR ARCHIVOS ← PRIMERA PÁGINA DEL LOOP
-        # ════════════════════════════════════════════════════════════════
+
+        # ── Paso 2: Confirmar archivos ────────────────────────────────────────
         if ! confirm_input_files; then
-            # Usuario presionó Cancel - Volver a Paso 1
             if ! select_input_files; then
                 exit 0
             fi
-            # Reinicia el loop desde Paso 2
             continue
         fi
-        
-        # ════════════════════════════════════════════════════════════════
-        # PASOS 3-7: CONFIGURACIÓN
-        # ════════════════════════════════════════════════════════════════
+
+        # ── Pasos 3-7: Configuración de conversión ────────────────────────────
         select_audio_options 3
         local config_result=$?
-        
+
         if (( config_result == 1 )); then
-            # Cancel - Cerrar programa completamente
             exit 0
         elif (( config_result == 2 )); then
-            # Atrás - Volver a Paso 2 (confirmación)
-            # El loop while continúa, volviendo a Paso 2
             continue
         fi
-        # Si es 0, configuración completada - continuar a conversión
-        
-        # ════════════════════════════════════════════════════════════════
-        # CONVERSIÓN
-        # ════════════════════════════════════════════════════════════════
+
+        # ── Conversión ────────────────────────────────────────────────────────
         process_conversions
-        local conversion_result=$?
-        
-        if (( conversion_result == 2 )); then
-            # Cancel durante conversión - Volver a Paso 2
+        local conv_result=$?
+
+        if (( conv_result == 2 )); then
             continue
         fi
-        
-        # Conversión completada exitosamente
+
         exit 0
     done
 }
 
-# Ejecutar programa principal
 main "$@"
 exit 0
